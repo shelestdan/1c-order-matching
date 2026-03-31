@@ -1,5 +1,5 @@
-[phases.setup]
-aptPkgs = ["python3", "python3-pip"]
+[variables]
+NIXPACKS_PYTHON_VERSION = "3.11"
 
 [phases.install]
-cmds = ["python3 -m pip install -r requirements-api.txt"]
+cmds = ["pip install -r requirements-api.txt"]
