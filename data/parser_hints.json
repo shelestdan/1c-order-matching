@@ -1,0 +1,681 @@
+{
+  "metadata": {
+    "version": "1.1.0",
+    "generated_on": "2026-03-31",
+    "description": "Parser hints для понимания клиентских запросов и спецификаций"
+  },
+  "query_understanding": {
+    "preprocessing": {
+      "strip_leading_patterns": [
+        "^\\s*поз(?:иция)?\\s*[:№]*\\s*\\d+(?:\\.\\d+)*\\s*",
+        "^\\s*\\(?рф\\)?\\s*"
+      ],
+      "strip_trailing_patterns": [
+        "\\s+шт\\.?\\s*\\d+\\s*$",
+        "\\s+пом\\.\\s*[-\\dа-яa-z]+\\s*$",
+        "\\s+россия\\s*$"
+      ],
+      "ignore_full_row_patterns": [
+        "^\\s*наименование\\s*$",
+        "^\\s*раздел:",
+        "^\\s*основание:",
+        "^\\s*оборудование\\s*$",
+        "^\\s*система\\s+[а-яa-z0-9]+\\s*$",
+        "^\\s*ввод\\s+[а-яa-z0-9,\\s.-]+$",
+        "^\\s*узел учета\\b"
+      ],
+      "space_dash_normalization": true,
+      "normalize_nbsp": true,
+      "normalize_degree_sign": true
+    },
+    "mixed_script_normalization": {
+      "apply_only_if_token_contains_both_scripts_or_is_in_technical_dictionary": true,
+      "char_map": {
+        "A": "А",
+        "B": "В",
+        "C": "С",
+        "E": "Е",
+        "H": "Н",
+        "K": "К",
+        "M": "М",
+        "O": "О",
+        "P": "Р",
+        "T": "Т",
+        "X": "Х",
+        "Y": "У",
+        "a": "а",
+        "c": "с",
+        "e": "е",
+        "h": "н",
+        "k": "к",
+        "m": "м",
+        "o": "о",
+        "p": "р",
+        "t": "т",
+        "x": "х",
+        "y": "у"
+      }
+    },
+    "token_aliases": {
+      "female_female": [
+        "вр-вр",
+        "вн/вн",
+        "вн./вн.",
+        "вв",
+        "внутренняя-внутренняя",
+        "внутренняя резьба/внутренняя резьба",
+        "вн-вн"
+      ],
+      "female_male": [
+        "вр-нр",
+        "вн/нр",
+        "вр/нр",
+        "вн-нар",
+        "внутренняя-наружная",
+        "внутренняя резьба/наружная резьба"
+      ],
+      "male_male": [
+        "нр-нр",
+        "нр/нр",
+        "нар-нар",
+        "наружная-наружная",
+        "наружная резьба/наружная резьба"
+      ],
+      "butterfly_handle": [
+        "бабочка",
+        "рукоятка-бабочка",
+        "ручка-бабочка"
+      ],
+      "lever_handle": [
+        "рычаг",
+        "ручка-рычаг"
+      ],
+      "american_union": [
+        "американка",
+        "со сгоном"
+      ],
+      "grooved": [
+        "грувлок",
+        "grooved",
+        "под муфту"
+      ],
+      "magnetic_insert": [
+        "магнитный",
+        "с магнитной вставкой",
+        "магнитно-механический"
+      ],
+      "mesh_strainer": [
+        "сетчатый",
+        "механической очистки",
+        "косой",
+        "угловой"
+      ],
+      "rubber_wedge": [
+        "с обрезиненным клином"
+      ],
+      "handwheel": [
+        "со штурвалом",
+        "ручное управление"
+      ],
+      "electric_actuator": [
+        "с электроприводом",
+        "под электропривод"
+      ],
+      "gearbox_operator": [
+        "с редуктором"
+      ],
+      "before_meter": [
+        "до счетчика",
+        "пдс"
+      ],
+      "after_meter": [
+        "после счетчика",
+        "ппс"
+      ],
+      "flange_plain_end": [
+        "фланец-гладкий конец",
+        "фланцевый гладкий",
+        "пфг"
+      ],
+      "combined_meter": [
+        "комбинированный"
+      ],
+      "turbine_meter": [
+        "турбинный"
+      ],
+      "impeller_meter": [
+        "крыльчатый",
+        "многоструйный"
+      ],
+      "pulse_output": [
+        "импульсный выход"
+      ],
+      "rs485": [
+        "rs-485",
+        "rs485"
+      ]
+    },
+    "family_triggers": {
+      "flange": {
+        "aliases": [
+          "фланец",
+          "комплект фланцев",
+          "плоский приварной",
+          "воротниковый",
+          "тип 01",
+          "тип 11"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "плоский приварной",
+              "тип 01"
+            ],
+            "set": {
+              "family": "flange",
+              "subtype": "flat_welded",
+              "type": "01"
+            }
+          },
+          {
+            "match_any": [
+              "воротниковый",
+              "приварной встык",
+              "тип 11"
+            ],
+            "set": {
+              "family": "flange",
+              "subtype": "weld_neck",
+              "type": "11"
+            }
+          }
+        ]
+      },
+      "perehod": {
+        "aliases": [
+          "переход",
+          "муфта переходная",
+          "муфта перех.",
+          "редукция",
+          "концентрический",
+          "эксцентрический",
+          "фланцевый переход"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "концентрический"
+            ],
+            "set": {
+              "family": "perehod",
+              "shape": "concentric"
+            }
+          },
+          {
+            "match_any": [
+              "эксцентрический"
+            ],
+            "set": {
+              "family": "perehod",
+              "shape": "eccentric"
+            }
+          },
+          {
+            "match_any": [
+              "фланцевый переход"
+            ],
+            "set": {
+              "family": "perehod",
+              "subfamily": "flanged"
+            }
+          },
+          {
+            "match_any": [
+              "муфта переходная",
+              "муфта перех."
+            ],
+            "set": {
+              "family": "perehod",
+              "subfamily": "coupling"
+            }
+          }
+        ]
+      },
+      "elbow": {
+        "aliases": [
+          "отвод",
+          "колено"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "грувлок",
+              "под муфту"
+            ],
+            "set": {
+              "family": "elbow",
+              "connection": "grooved"
+            }
+          },
+          {
+            "match_any": [
+              "из ковкого чугуна"
+            ],
+            "set": {
+              "family": "elbow",
+              "material": "malleable_cast_iron"
+            }
+          },
+          {
+            "match_any": [
+              "крутоизогнутый",
+              "гост 17375"
+            ],
+            "set": {
+              "family": "elbow",
+              "subfamily": "welded_standard"
+            }
+          }
+        ]
+      },
+      "tee": {
+        "aliases": [
+          "тройник"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "переходной"
+            ],
+            "set": {
+              "family": "tee",
+              "subtype": "reducing"
+            }
+          },
+          {
+            "match_any": [
+              "равнопроходной"
+            ],
+            "set": {
+              "family": "tee",
+              "subtype": "equal"
+            }
+          },
+          {
+            "match_any": [
+              "напресовочный"
+            ],
+            "set": {
+              "family": "tee",
+              "subtype": "press"
+            }
+          },
+          {
+            "match_any": [
+              "фланцевый"
+            ],
+            "set": {
+              "family": "tee",
+              "subtype": "flanged"
+            }
+          }
+        ]
+      },
+      "zadvizhka": {
+        "aliases": [
+          "задвижка",
+          "клиновая",
+          "с обрезиненным клином"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "с обрезиненным клином"
+            ],
+            "set": {
+              "family": "zadvizhka",
+              "subtype": "rubber_wedge"
+            }
+          },
+          {
+            "match_any": [
+              "клиновая"
+            ],
+            "set": {
+              "family": "zadvizhka",
+              "subtype": "gate"
+            }
+          },
+          {
+            "match_any": [
+              "со штурвалом",
+              "ручным управлением"
+            ],
+            "set": {
+              "actuator": "handwheel"
+            }
+          },
+          {
+            "match_any": [
+              "с электроприводом",
+              "под электропривод"
+            ],
+            "set": {
+              "actuator": "electric"
+            }
+          },
+          {
+            "match_any": [
+              "короткая"
+            ],
+            "set": {
+              "face_to_face": "short"
+            }
+          }
+        ]
+      },
+      "gearbox": {
+        "aliases": [
+          "редуктор",
+          "(рвз) редуктор",
+          "редуктор д/затв",
+          "редуктор д/затвора",
+          "редуктор для затвор"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "д/затв",
+              "д/затвора",
+              "для затвор"
+            ],
+            "set": {
+              "family": "gearbox",
+              "for_family": "zatvor"
+            }
+          },
+          {
+            "match_any": [
+              "четвертьоборотный"
+            ],
+            "set": {
+              "family": "gearbox",
+              "turn_type": "quarter_turn"
+            }
+          },
+          {
+            "match_any": [
+              "конический"
+            ],
+            "set": {
+              "family": "gearbox",
+              "subtype": "bevel"
+            }
+          }
+        ]
+      },
+      "kran": {
+        "aliases": [
+          "кран",
+          "шаровой кран",
+          "трехходовой",
+          "дренажный",
+          "для манометра"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "шаровой"
+            ],
+            "set": {
+              "family": "kran",
+              "subtype": "ball_valve"
+            }
+          },
+          {
+            "match_any": [
+              "трехходовой"
+            ],
+            "set": {
+              "family": "kran",
+              "subtype": "three_way"
+            }
+          },
+          {
+            "match_any": [
+              "дренажный",
+              "сливной"
+            ],
+            "set": {
+              "family": "kran",
+              "subtype": "drain"
+            }
+          },
+          {
+            "match_any": [
+              "для манометра"
+            ],
+            "set": {
+              "family": "kran",
+              "subtype": "gauge_cock"
+            }
+          }
+        ]
+      },
+      "filter": {
+        "aliases": [
+          "фильтр",
+          "грязевик",
+          "косой фильтр"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "магнитный",
+              "с магнитной вставкой"
+            ],
+            "set": {
+              "family": "filter",
+              "has_magnet": true
+            }
+          },
+          {
+            "match_any": [
+              "сетчатый"
+            ],
+            "set": {
+              "family": "filter",
+              "filter_element": "mesh"
+            }
+          },
+          {
+            "match_any": [
+              "косой",
+              "угловой"
+            ],
+            "set": {
+              "family": "filter",
+              "subtype": "angled"
+            }
+          },
+          {
+            "match_any": [
+              "грязевик"
+            ],
+            "set": {
+              "family": "filter",
+              "subtype": "mud_filter"
+            }
+          }
+        ]
+      },
+      "patrubok": {
+        "aliases": [
+          "патрубок",
+          "до счетчика",
+          "после счетчика",
+          "фланец-гладкий конец",
+          "пдс",
+          "ппс",
+          "пфг"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "до счетчика",
+              "пдс"
+            ],
+            "set": {
+              "family": "patrubok",
+              "subfamily": "pds"
+            }
+          },
+          {
+            "match_any": [
+              "после счетчика",
+              "ппс"
+            ],
+            "set": {
+              "family": "patrubok",
+              "subfamily": "pps"
+            }
+          },
+          {
+            "match_any": [
+              "фланец-гладкий конец",
+              "фланцевый гладкий",
+              "пфг"
+            ],
+            "set": {
+              "family": "patrubok",
+              "subfamily": "pfg"
+            }
+          }
+        ]
+      },
+      "schetchik": {
+        "aliases": [
+          "счетчик",
+          "водомер",
+          "расходомер"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "комбинированный"
+            ],
+            "set": {
+              "family": "schetchik",
+              "meter_type": "combined"
+            }
+          },
+          {
+            "match_any": [
+              "турбинный"
+            ],
+            "set": {
+              "family": "schetchik",
+              "meter_type": "turbine"
+            }
+          },
+          {
+            "match_any": [
+              "крыльчатый",
+              "многоструйный"
+            ],
+            "set": {
+              "family": "schetchik",
+              "meter_type": "impeller"
+            }
+          },
+          {
+            "match_any": [
+              "импульсный выход"
+            ],
+            "set": {
+              "pulse_output": true
+            }
+          },
+          {
+            "match_any": [
+              "rs-485",
+              "rs485"
+            ],
+            "set": {
+              "interface": "rs-485"
+            }
+          }
+        ]
+      },
+      "manometr": {
+        "aliases": [
+          "манометр"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "g1/2",
+              "1/2\""
+            ],
+            "set": {
+              "family": "manometr",
+              "connection_guess": "1/2"
+            }
+          },
+          {
+            "match_any": [
+              "снизу"
+            ],
+            "set": {
+              "connection_position": "bottom"
+            }
+          },
+          {
+            "match_any": [
+              "кл.1,5",
+              "класс 1,5"
+            ],
+            "set": {
+              "accuracy_class": "1.5"
+            }
+          }
+        ]
+      },
+      "vozduhootvod": {
+        "aliases": [
+          "воздухоотводчик",
+          "автоматический воздухоотводчик",
+          "вантуз"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "автоматический"
+            ],
+            "set": {
+              "family": "vozduhootvod",
+              "subtype": "automatic"
+            }
+          },
+          {
+            "match_any": [
+              "горизонтальным расположением колпачка"
+            ],
+            "set": {
+              "orientation": "horizontal_cap"
+            }
+          },
+          {
+            "match_any": [
+              "вантуз"
+            ],
+            "set": {
+              "family": "vozduhootvod",
+              "subtype": "cast_iron_air_valve"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

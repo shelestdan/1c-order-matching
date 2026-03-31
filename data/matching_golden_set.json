@@ -1,0 +1,287 @@
+{
+  "version": 1,
+  "metadata": {
+    "version": "1.0.0",
+    "generated_on": "2026-03-30",
+    "source_workbook": "/Users/kristinakarpova/Downloads/Запрос 17.03.26 (2)__normalized__аналоги (1).xlsx",
+    "description": "Сгруппированный golden set по ручной разметке аналогов"
+  },
+  "case_count": 19,
+  "approved_candidate_total": 12,
+  "rejected_candidate_total": 64,
+  "cases": [
+    {
+      "query": "Отвод 180-2-76х3 ГОСТ 17375-2001",
+      "query_key": "otvod 180-2-76x3 deg180 series2 od76 wall3 180 2 76x3 gost 17375-2001 spec17375",
+      "approved_candidate_codes": [],
+      "rejected_candidate_codes": [
+        "П0000002138",
+        "П0000006383",
+        "П0000010860",
+        "П0000044276"
+      ],
+      "sources": [
+        "Аналоги:8"
+      ]
+    },
+    {
+      "query": "Отвод 180-2-89х3,5 Ст20 ГОСТ17375-2001",
+      "query_key": "otvod 180-2-89x3.5 deg180 series2 od89 wall3.5 180 2 89x3.5 st20 mat20 gost17375-2001",
+      "approved_candidate_codes": [],
+      "rejected_candidate_codes": [
+        "00-00007296",
+        "00-00024509",
+        "П0000002145",
+        "П0000044277"
+      ],
+      "sources": [
+        "Аналоги:7"
+      ]
+    },
+    {
+      "query": "Отвод 45-2-57x4-20 ГОСТ 17375-2001",
+      "query_key": "otvod 45-2-57x4-20 deg45 series2 od57 wall4 mat20 45 2 57x4 20 gost 17375-2001 spec17375",
+      "approved_candidate_codes": [
+        "00-00024491",
+        "00-00024507"
+      ],
+      "rejected_candidate_codes": [
+        "00-00035089",
+        "П0000004992"
+      ],
+      "sources": [
+        "Аналоги:10"
+      ]
+    },
+    {
+      "query": "Отвод 45-2-57x4,5-В10(-20)(09Г2С) ГОСТ 17375-2001",
+      "query_key": "otvod 45-2-57x4.5-v10 deg45 series2 od57 wall4.5 matv10 45 2 57x4.5 v10 20 09g2s gost 17375-2001 spec17375",
+      "approved_candidate_codes": [],
+      "rejected_candidate_codes": [
+        "00-00003675",
+        "00-00024491",
+        "00-00024507",
+        "П0000001819"
+      ],
+      "sources": [
+        "Аналоги:13"
+      ]
+    },
+    {
+      "query": "Отвод 45-2-76х3,5 ГОСТ17375-2001",
+      "query_key": "otvod 45-2-76x3.5 deg45 series2 od76 wall3.5 45 2 76x3.5 gost17375-2001",
+      "approved_candidate_codes": [
+        "00-00004830",
+        "00-00031025",
+        "П0000006383"
+      ],
+      "rejected_candidate_codes": [
+        "П0000002138"
+      ],
+      "sources": [
+        "Аналоги:11"
+      ]
+    },
+    {
+      "query": "Отвод 45-2-89х3-20 ГОСТ17375-2001",
+      "query_key": "otvod 45-2-89x3-20 deg45 series2 od89 wall3 mat20 45 2 89x3 20 gost17375-2001",
+      "approved_candidate_codes": [],
+      "rejected_candidate_codes": [
+        "00-00008434",
+        "00-00024509",
+        "П0000004994",
+        "П0000009435"
+      ],
+      "sources": [
+        "Аналоги:12"
+      ]
+    },
+    {
+      "query": "Отвод 60-2-38x3,5-20 ГОСТ 17375-2001",
+      "query_key": "otvod 60-2-38x3.5-20 deg60 series2 od38 wall3.5 mat20 60 2 38x3.5 20 gost 17375-2001 spec17375",
+      "approved_candidate_codes": [],
+      "rejected_candidate_codes": [
+        "П0000001023",
+        "П0000001041",
+        "П0000023915",
+        "П0000045446"
+      ],
+      "sources": [
+        "Аналоги:4"
+      ]
+    },
+    {
+      "query": "Отвод 90-2-273х14-20 ГОСТ 17375-2001",
+      "query_key": "otvod 90-2-273x14-20 deg90 series2 od273 wall14 mat20 90 2 273x14 20 gost 17375-2001 spec17375",
+      "approved_candidate_codes": [],
+      "rejected_candidate_codes": [
+        "П0000002184",
+        "П0000002186",
+        "П0000029327",
+        "П0000066790"
+      ],
+      "sources": [
+        "Аналоги:2"
+      ]
+    },
+    {
+      "query": "Отвод 90-2-38x4-В10(-20)(09Г2С) ГОСТ 17375-2001",
+      "query_key": "otvod 90-2-38x4-v10 deg90 series2 od38 wall4 matv10 90 2 38x4 v10 20 09g2s gost 17375-2001 spec17375",
+      "approved_candidate_codes": [
+        "П0000047812"
+      ],
+      "rejected_candidate_codes": [
+        "00-00018490",
+        "00-00024502",
+        "П0000002153"
+      ],
+      "sources": [
+        "Аналоги:14"
+      ]
+    },
+    {
+      "query": "Отвод 90-2-57x5--20 ГОСТ 17375-2001",
+      "query_key": "otvod 90-2-57x5--20 90 2 57x5 20 gost 17375-2001 spec17375",
+      "approved_candidate_codes": [
+        "00-00030960",
+        "П0000002134"
+      ],
+      "rejected_candidate_codes": [
+        "00-00001606",
+        "П0000001820"
+      ],
+      "sources": [
+        "Аналоги:9"
+      ]
+    },
+    {
+      "query": "Отвод 90-2-89х7-20 ГОСТ 17375-2001",
+      "query_key": "otvod 90-2-89x7-20 deg90 series2 od89 wall7 mat20 90 2 89x7 20 gost 17375-2001 spec17375",
+      "approved_candidate_codes": [],
+      "rejected_candidate_codes": [
+        "П0000002145",
+        "П0000002148",
+        "П0000002184",
+        "П0000066790"
+      ],
+      "sources": [
+        "Аналоги:3"
+      ]
+    },
+    {
+      "query": "Переход К-1-273х7-219х6-В10 ГОСТ 17378-2001",
+      "query_key": "perehod k-1-273x7-219x6-v10 k facek 1 273x7 219x6 v10 gost 17378-2001 spec17378",
+      "approved_candidate_codes": [
+        "00-00031206",
+        "П0000002542"
+      ],
+      "rejected_candidate_codes": [
+        "00-00033545",
+        "П0000002540"
+      ],
+      "sources": [
+        "Аналоги:5"
+      ]
+    },
+    {
+      "query": "Переход К-1-57х4-38х4-В10 (-20)(09Г2С)ГОСТ17378-2001",
+      "query_key": "perehod k-1-57x4-38x4-v10 k facek 1 57x4 38x4 v10 20 09g2s gost17378-2001",
+      "approved_candidate_codes": [],
+      "rejected_candidate_codes": [
+        "00-00002084",
+        "00-00010678",
+        "00-00027180",
+        "П0000002507"
+      ],
+      "sources": [
+        "Аналоги:17"
+      ]
+    },
+    {
+      "query": "Переход К-1-76x5-57x4-В10(-20)(09Г2С) ГОСТ 17378-2001",
+      "query_key": "perehod k-1-76x5-57x4-v10 k facek 1 76x5 57x4 v10 20 09g2s gost 17378-2001 spec17378",
+      "approved_candidate_codes": [],
+      "rejected_candidate_codes": [
+        "00-00024540",
+        "П0000017527",
+        "П0000046104",
+        "П0000065342"
+      ],
+      "sources": [
+        "Аналоги:16"
+      ]
+    },
+    {
+      "query": "Переход К-1-89x3,5-57x3-В10(-20)(09Г2С) ГОСТ 17378-2001",
+      "query_key": "perehod k-1-89x3.5-57x3-v10 k facek 1 89x3.5 57x3 v10 20 09g2s gost 17378-2001 spec17378",
+      "approved_candidate_codes": [
+        "00-00031211"
+      ],
+      "rejected_candidate_codes": [
+        "00-00027180",
+        "П0000002505",
+        "П0000043895"
+      ],
+      "sources": [
+        "Аналоги:15"
+      ]
+    },
+    {
+      "query": "Переход К-1-89х6-76х6-20 ГОСТ 17378-2001",
+      "query_key": "perehod k-1-89x6-76x6-20 k facek 1 89x6 76x6 20 gost 17378-2001 spec17378",
+      "approved_candidate_codes": [
+        "П0000046104"
+      ],
+      "rejected_candidate_codes": [
+        "П0000002530",
+        "П0000014226",
+        "П0000046105"
+      ],
+      "sources": [
+        "Аналоги:6"
+      ]
+    },
+    {
+      "query": "Тройник 57x4-В10(-20)(09Г2С) ГОСТ 17376-2001",
+      "query_key": "troinik 57x4-v10 20 09g2s gost 17376-2001 spec17376",
+      "approved_candidate_codes": [],
+      "rejected_candidate_codes": [
+        "00-00002073",
+        "00-00006633",
+        "П0000007517",
+        "П0000022311"
+      ],
+      "sources": [
+        "Аналоги:18"
+      ]
+    },
+    {
+      "query": "Тройник 57x5-45x4-В10(-20)(09Г2С) ГОСТ 17376-2001",
+      "query_key": "troinik 57x5-45x4-v10 57x5 45x4 v10 20 09g2s gost 17376-2001 spec17376",
+      "approved_candidate_codes": [],
+      "rejected_candidate_codes": [
+        "00-00002073",
+        "00-00006633",
+        "00-00024539",
+        "П0000007517"
+      ],
+      "sources": [
+        "Аналоги:20"
+      ]
+    },
+    {
+      "query": "Тройник 76x6-45x4-В10(-20)(09Г2С) ГОСТ 17376-2001",
+      "query_key": "troinik 76x6-45x4-v10 76x6 45x4 v10 20 09g2s gost 17376-2001 spec17376",
+      "approved_candidate_codes": [],
+      "rejected_candidate_codes": [
+        "00-00024539",
+        "П0000022311",
+        "П0000048924",
+        "П0000059264"
+      ],
+      "sources": [
+        "Аналоги:19"
+      ]
+    }
+  ]
+}

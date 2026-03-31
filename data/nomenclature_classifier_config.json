@@ -1,0 +1,446 @@
+{
+  "metadata": {
+    "name": "vgs2000-nomenclature-classifier",
+    "version": "1.0.0",
+    "generated_on": "2026-03-30"
+  },
+  "semantic_reranker": {
+    "enabled": true,
+    "model_name": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "device": "cpu",
+    "max_candidates": 4,
+    "min_query_chars": 7,
+    "min_specificity": 3.5,
+    "min_base_score": 34.0,
+    "confident_score": 82.0,
+    "gap_threshold": 8.0,
+    "semantic_threshold": 0.34,
+    "semantic_weight": 12.0
+  },
+  "service_tokens": [
+    "шт",
+    "шт.",
+    "sht",
+    "pcs",
+    "ед",
+    "ед.",
+    "komplekt",
+    "komplektom",
+    "up",
+    "upak"
+  ],
+  "global_phrase_aliases": {
+    "пож рукав": "рукав пожарный",
+    "рукав пож": "рукав пожарный",
+    "затв диск": "затвор дисковый",
+    "затв дисковый": "затвор дисковый",
+    "диск затвор": "затвор дисковый",
+    "кран шар": "кран шаровой",
+    "шар кран": "кран шаровой",
+    "ручка для затвора": "ручка затвора",
+    "рукоять для затвора": "рукоять затвора",
+    "колено грувлок": "отвод грувлок",
+    "колено grooved": "отвод grooved",
+    "вн. резьба": "внутренняя резьба",
+    "вн резьба": "внутренняя резьба"
+  },
+  "global_token_aliases": {
+    "фл": ["flanec"],
+    "флан": ["flanec"],
+    "затв": ["zatvor"],
+    "затв.": ["zatvor"],
+    "диск": ["diskovyi"],
+    "диск.": ["diskovyi"],
+    "шар": ["sharovyi"],
+    "шар.": ["sharovyi"],
+    "пож": ["pozharnyi"],
+    "пож.": ["pozharnyi"],
+    "муфт": ["mufta"],
+    "муфт.": ["mufta"],
+    "оцинк": ["ocinkovannyi"],
+    "оцинк.": ["ocinkovannyi"],
+    "рукоят": ["rukoiat"],
+    "рукоять": ["rukoiat"],
+    "ручка": ["ruchka"],
+    "манж": ["manzheta"],
+    "манж.": ["manzheta"],
+    "грвлок": ["gruvlok"],
+    "грувл": ["gruvlok"],
+    "грувлок": ["gruvlok"],
+    "межфл": ["mezhflancevyi"],
+    "межфл.": ["mezhflancevyi"],
+    "вн": ["vnutrennyaya"],
+    "вн.": ["vnutrennyaya"],
+    "вн.р": ["vnutrennyaya", "rezba"],
+    "вн/р": ["vnutrennyaya", "rezba"],
+    "пэ": ["pe"],
+    "пнд": ["pnd"],
+    "вгп": ["vodogazoprovodnaya"],
+    "ду": ["dn"],
+    "dn": ["dn"],
+    "pn": ["pn"],
+    "ру": ["pn"]
+  },
+  "material_aliases": {
+    "steel": ["stal", "stalnoi", "stalnaya", "stalnye", "stalnyh", "st", "st20", "09g2s"],
+    "cast_iron": ["chugun", "vchshg", "kovk"],
+    "brass": ["latun", "latunnyi"],
+    "polypropylene": ["ppr", "polipropilen", "polipropilenovyi"],
+    "polyethylene": ["pe", "pe80", "pe100", "pnd", "polietilen", "hdpe", "pex", "pert"],
+    "pvc": ["pvc", "pvc-u", "pvh", "u-pvc"],
+    "stainless": ["nerzh", "aisi304", "aisi316", "aisi321", "inox"]
+  },
+  "connection_aliases": {
+    "grooved": ["gruvlok", "grooved", "victaulic"],
+    "threaded": ["rezba", "vr", "nr", "vnutrennyaya", "naruzhnaya", "вн", "вн.", "вн.р", "вн/р"],
+    "welded": ["svarka", "privarnoi", "privarnaya"],
+    "flanged": ["flanec", "mezhflancevyi", "межфл", "межфл."]
+  },
+  "categories": [
+    {
+      "key": "flange",
+      "label": "Фланец",
+      "route": "stock_match",
+      "family_tags": ["flange"],
+      "manual_review_comment": "при отсутствии точного совпадения проверьте тип фланца, DN, PN и исполнение",
+      "required_attributes": ["dn"],
+      "aliases": ["фланец", "фл", "flange"],
+      "strong_tokens": {
+        "flanec": 18.0
+      },
+      "context_tokens": {
+        "dn": 5.0,
+        "pn": 4.0,
+        "stal": 3.0,
+        "vorotnikovyi": 4.0,
+        "ploskii": 4.0
+      },
+      "blocker_tokens": ["kran", "zatvor", "zadvizhka", "rukoiat", "ruchka"]
+    },
+    {
+      "key": "air_vent",
+      "label": "Воздухоотводчик",
+      "route": "stock_match",
+      "family_tags": ["vozduhootvod"],
+      "manual_review_comment": "при отсутствии точного совпадения уточните DN, тип корпуса, ориентацию, резьбу и исполнение",
+      "required_attributes": ["dn_or_inch"],
+      "aliases": ["воздухоотводчик", "автовоздухоотводчик", "вантуз", "air vent"],
+      "strong_tokens": {
+        "vozduhootvod": 18.0,
+        "vantuz": 12.0
+      },
+      "context_tokens": {
+        "avtomaticheskii": 5.0,
+        "dn": 5.0,
+        "latun": 4.0,
+        "rezba": 3.0
+      },
+      "blocker_tokens": ["filtr", "zatvor", "kran", "klapan", "flanec"]
+    },
+    {
+      "key": "butterfly_valve",
+      "label": "Затвор дисковый",
+      "route": "stock_match",
+      "family_tags": ["zatvor"],
+      "manual_review_comment": "при отсутствии точного совпадения уточните тип затвора, DN, PN, привод и исполнение",
+      "required_attributes": ["dn"],
+      "aliases": ["затвор", "затв", "затвор дисковый", "дисковый затвор", "затв дисковый"],
+      "strong_tokens": {
+        "zatvor": 17.0,
+        "diskovyi": 12.0
+      },
+      "context_tokens": {
+        "mezhflancevyi": 5.0,
+        "povorotnyi": 4.0,
+        "dn": 5.0,
+        "pn": 4.0,
+        "ruchka": 2.0
+      },
+      "blocker_tokens": ["kran", "zadvizhka", "flanec"]
+    },
+    {
+      "key": "gate_valve",
+      "label": "Задвижка",
+      "route": "stock_match",
+      "family_tags": ["zadvizhka"],
+      "manual_review_comment": "при отсутствии точного совпадения уточните тип задвижки, DN, PN и материал",
+      "required_attributes": ["dn"],
+      "aliases": ["задвижка", "задв", "gate valve"],
+      "strong_tokens": {
+        "zadvizhka": 18.0
+      },
+      "context_tokens": {
+        "dn": 5.0,
+        "pn": 4.0,
+        "klin": 4.0,
+        "shiber": 4.0
+      },
+      "blocker_tokens": ["zatvor", "kran", "ruchka"]
+    },
+    {
+      "key": "ball_valve",
+      "label": "Кран шаровой",
+      "route": "stock_match",
+      "family_tags": ["kran"],
+      "manual_review_comment": "при отсутствии точного совпадения уточните размер, тип резьбы или присоединения и материал крана",
+      "required_attributes": ["dn_or_inch"],
+      "aliases": ["кран шаровой", "кран шар", "шаровый кран", "кран"],
+      "strong_tokens": {
+        "kran": 13.0,
+        "sharovyi": 12.0
+      },
+      "context_tokens": {
+        "dn": 5.0,
+        "pn": 3.0,
+        "vr": 3.0,
+        "nr": 3.0,
+        "latun": 4.0,
+        "rezba": 4.0
+      },
+      "blocker_tokens": ["zatvor", "zadvizhka", "rukoiat"]
+    },
+    {
+      "key": "check_valve",
+      "label": "Клапан обратный",
+      "route": "stock_match",
+      "family_tags": ["klapan"],
+      "manual_review_comment": "при отсутствии точного совпадения уточните тип обратного клапана, DN, PN, тип присоединения и материал",
+      "required_attributes": ["dn_or_inch"],
+      "aliases": ["клапан обратный", "обратный клапан", "клапан обр", "check valve"],
+      "strong_tokens": {
+        "klapan": 12.0,
+        "obratnyi": 15.0
+      },
+      "context_tokens": {
+        "dn": 5.0,
+        "pn": 4.0,
+        "muftovyi": 4.0,
+        "mezhflancevyi": 4.0,
+        "latun": 3.0,
+        "flanec": 2.0
+      },
+      "blocker_tokens": ["kran", "zatvor", "zadvizhka", "rukoiat", "filtr"]
+    },
+    {
+      "key": "elbow",
+      "label": "Отвод / колено",
+      "route": "stock_match",
+      "family_tags": ["elbow"],
+      "manual_review_comment": "при отсутствии точного совпадения уточните угол, размер, материал и тип соединения",
+      "required_attributes": ["angle_or_dn"],
+      "aliases": ["отвод", "колено", "угольник", "угол", "отвод 90", "отвод 45", "угол 90", "угол 45"],
+      "strong_tokens": {
+        "otvod": 14.0,
+        "koleno": 14.0,
+        "ugol": 14.0
+      },
+      "context_tokens": {
+        "90": 4.0,
+        "45": 4.0,
+        "87": 3.0,
+        "dn": 5.0,
+        "gruvlok": 6.0
+      },
+      "blocker_tokens": ["troinik", "mufta", "flanec", "zaglushka", "gruvlok", "grooved", "victaulic"]
+    },
+    {
+      "key": "tee",
+      "label": "Тройник",
+      "route": "stock_match",
+      "family_tags": ["tee"],
+      "manual_review_comment": "при отсутствии точного совпадения уточните тип тройника, размеры и материал",
+      "required_attributes": ["size_or_dn"],
+      "aliases": ["тройник", "tee"],
+      "strong_tokens": {
+        "troinik": 18.0
+      },
+      "context_tokens": {
+        "perehodnoi": 5.0,
+        "ravnoprohodnoi": 5.0,
+        "pe": 4.0,
+        "pnd": 4.0,
+        "ppr": 4.0,
+        "dn": 4.0
+      },
+      "blocker_tokens": ["otvod", "mufta", "perehod", "zaglushka", "gruvlok", "grooved", "victaulic"]
+    },
+    {
+      "key": "coupling",
+      "label": "Муфта",
+      "route": "stock_match",
+      "family_tags": ["mufta"],
+      "manual_review_comment": "при отсутствии точного совпадения уточните тип муфты, размеры, материал и тип соединения",
+      "required_attributes": ["size_or_dn"],
+      "aliases": ["муфта", "муфт", "американка"],
+      "strong_tokens": {
+        "mufta": 18.0,
+        "amerikanka": 10.0
+      },
+      "context_tokens": {
+        "ocinkovannyi": 4.0,
+        "rezba": 4.0,
+        "dn": 4.0
+      },
+      "blocker_tokens": ["troinik", "otvod", "flanec", "gruvlok", "grooved", "victaulic"]
+    },
+    {
+      "key": "grooved_fitting",
+      "label": "Грувлок-фитинг",
+      "route": "manual_review",
+      "family_tags": ["grooved"],
+      "manual_review_comment": "требует ручного подбора: по грувлок-позициям важны система соединения, диаметр, профиль канавки и рабочее давление",
+      "required_attributes": ["dn_or_od"],
+      "aliases": ["грувлок", "gruvlok", "grooved", "victaulic", "под муфту грувлок"],
+      "strong_tokens": {
+        "gruvlok": 20.0,
+        "grooved": 20.0,
+        "victaulic": 20.0
+      },
+      "context_tokens": {
+        "otvod": 5.0,
+        "troinik": 5.0,
+        "mufta": 5.0,
+        "zaglushka": 4.0,
+        "dn": 5.0
+      },
+      "blocker_tokens": ["pvc", "ppr", "kanalizacionnyi"]
+    },
+    {
+      "key": "fire_collar",
+      "label": "Манжета противопожарная",
+      "route": "manual_review",
+      "family_tags": [],
+      "manual_review_comment": "требует ручного подбора: по противопожарной манжете нужны диаметр трубы, материал трубы, огнестойкость и тип монтажа",
+      "required_attributes": ["dn_or_od"],
+      "aliases": ["манжета противопожарная", "ппм", "противопожарная манжета"],
+      "strong_tokens": {
+        "manzheta": 14.0,
+        "protivopozharnaya": 16.0
+      },
+      "context_tokens": {
+        "dn": 5.0,
+        "110": 3.0
+      },
+      "blocker_tokens": ["rukav", "unitaz", "zaglushka"]
+    },
+    {
+      "key": "fire_hose",
+      "label": "Рукав пожарный",
+      "route": "manual_review",
+      "family_tags": [],
+      "manual_review_comment": "требует ручного подбора: по пожарному рукаву нужны DN, длина, давление, тип головок и стандарт",
+      "required_attributes": ["dn_or_length"],
+      "aliases": ["рукав пожарный", "пож рукав", "рукав напорный"],
+      "strong_tokens": {
+        "rukav": 14.0,
+        "pozharnyi": 16.0
+      },
+      "context_tokens": {
+        "dn": 5.0,
+        "m": 3.0,
+        "20m": 5.0,
+        "golovka": 4.0
+      },
+      "blocker_tokens": ["manzheta", "unitaz", "kran"]
+    },
+    {
+      "key": "toilet",
+      "label": "Унитаз",
+      "route": "manual_review",
+      "family_tags": ["toilet"],
+      "manual_review_comment": "требует ручного подбора: по унитазам важны выпуск, тип установки, подвод воды, бачок и посадочные размеры",
+      "required_attributes": ["toilet_variant"],
+      "aliases": ["унитаз", "unitaz", "унитаз с косым выпуском", "унитаз с прямым выпуском"],
+      "strong_tokens": {
+        "unitaz": 20.0
+      },
+      "context_tokens": {
+        "kosym": 5.0,
+        "pryamym": 5.0,
+        "vypuskom": 6.0,
+        "podvesnoi": 4.0
+      },
+      "blocker_tokens": ["rakovina", "umyvalnik", "sifon"]
+    },
+    {
+      "key": "handle",
+      "label": "Ручка / рукоять",
+      "route": "manual_review",
+      "family_tags": [],
+      "manual_review_comment": "требует ручного подбора: по рукоятям и ручкам важны совместимость с изделием, тип посадки и серия",
+      "required_attributes": ["target_product"],
+      "aliases": ["ручка", "рукоять", "ручка затвора", "рукоять затвора", "рычаг"],
+      "strong_tokens": {
+        "ruchka": 16.0,
+        "rukoiat": 16.0
+      },
+      "context_tokens": {
+        "zatvora": 6.0,
+        "zatvor": 6.0,
+        "krana": 5.0,
+        "privod": 4.0
+      },
+      "blocker_tokens": ["kran", "zatvor", "zadvizhka"]
+    },
+    {
+      "key": "plug_cap",
+      "label": "Заглушка",
+      "route": "stock_match",
+      "family_tags": ["zaglushka"],
+      "manual_review_comment": "при отсутствии точного совпадения уточните назначение заглушки, материал и размер",
+      "required_attributes": ["size_or_dn"],
+      "aliases": ["заглушка", "колпак", "cap"],
+      "strong_tokens": {
+        "zaglushka": 18.0
+      },
+      "context_tokens": {
+        "dn": 5.0,
+        "pe": 4.0,
+        "pvc": 4.0
+      },
+      "blocker_tokens": ["otvod", "troinik", "mufta", "gruvlok", "grooved", "victaulic"]
+    },
+    {
+      "key": "filter",
+      "label": "Фильтр",
+      "route": "stock_match",
+      "family_tags": ["filter"],
+      "manual_review_comment": "при отсутствии точного совпадения уточните тип фильтра, размер и материал",
+      "required_attributes": ["dn_or_inch"],
+      "aliases": ["фильтр", "грязевик", "filter"],
+      "strong_tokens": {
+        "filtr": 16.0,
+        "gryazevik": 12.0
+      },
+      "context_tokens": {
+        "dn": 5.0,
+        "setchatyi": 4.0,
+        "latun": 3.0
+      },
+      "blocker_tokens": ["kran", "zatvor", "flanec"]
+    },
+    {
+      "key": "pipe",
+      "label": "Труба",
+      "route": "stock_match",
+      "family_tags": ["pipe"],
+      "manual_review_comment": "при отсутствии точного совпадения уточните материал трубы, диаметр, толщину стенки и стандарт",
+      "required_attributes": ["size_or_dn"],
+      "aliases": ["труба", "pipe"],
+      "strong_tokens": {
+        "truba": 18.0
+      },
+      "context_tokens": {
+        "dn": 5.0,
+        "od": 4.0,
+        "gost": 3.0,
+        "ppr": 4.0,
+        "pnd": 4.0,
+        "pe": 4.0,
+        "stal": 4.0,
+        "chugun": 4.0
+      },
+      "blocker_tokens": ["otvod", "troinik", "mufta", "flanec", "kran", "zatvor", "zadvizhka"]
+    }
+  ]
+}

@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "version": "1.1.1",
+    "generated_on": "2026-03-31",
+    "description": "Правила допустимости аналогов по ключевым семействам VGS2000 с parser-aware полями"
+  },
+  "families": {
+    "pipe": {
+      "label": "Труба",
+      "allow_exact": true,
+      "exact_required": ["family", "od", "wall", "spec"],
+      "exact_min_score": 84.0,
+      "safe_required": ["family", "od", "wall"],
+      "safe_min_score": 58.0,
+      "forbid_candidate_token_prefixes": ["ocink"],
+      "notes": "Для обычной электросварной трубы точным считается совпадение типа трубы, наружного диаметра, стенки и ГОСТ. Оцинковка не подменяет обычную трубу без явного запроса."
+    },
+    "flange": {
+      "label": "Фланец",
+      "allow_exact": false,
+      "safe_required": ["family", "dn", "pn", "type"],
+      "safe_min_score": 72.0,
+      "notes": "Для generic-запросов по фланцам требуется ручная проверка исполнения, ряда, поверхности и марки стали."
+    },
+    "elbow": {
+      "label": "Отвод / колено",
+      "allow_exact": false,
+      "safe_required": ["family", "od", "wall", "deg"],
+      "safe_min_score": 60.0,
+      "notes": "Безопасный аналог должен сохранять угол, наружный диаметр и стенку."
+    },
+    "tee": {
+      "label": "Тройник",
+      "allow_exact": true,
+      "exact_required": ["family", "tripledn"],
+      "exact_min_score": 60.0,
+      "safe_required": ["family", "tripledn"],
+      "safe_min_score": 56.0,
+      "notes": "Для тройников ключевым параметром считается полное совпадение тройного размера."
+    },
+    "perehod": {
+      "label": "Переход",
+      "allow_exact": true,
+      "exact_required": ["family", "pairdn"],
+      "exact_min_score": 60.0,
+      "safe_required": ["family", "pairdn"],
+      "safe_min_score": 56.0,
+      "analog_min_score": 30.0,
+      "forbid_exact_candidate_token_prefixes": ["subtype_inner_outer", "conn_gender_"],
+      "notes": "Для переходов ключевым параметром считается полное совпадение обеих размерных сторон."
+    },
+    "zatvor": {
+      "label": "Затвор",
+      "allow_exact": false,
+      "safe_required": ["family", "dn", "pn"],
+      "safe_min_score": 62.0,
+      "analog_min_score": 48.0,
+      "notes": "Для затворов DN и PN обязательны. Редуктор, рукоятка и электропривод - это исполнение/способ управления, а не отдельное семейство."
+    },
+    "gearbox": {
+      "label": "Редуктор",
+      "allow_exact": true,
+      "exact_required": ["family", "mounting_pad", "stem_square", "compatible_dn"],
+      "exact_min_score": 72.0,
+      "safe_required": ["family", "compatible_dn", "mounting_pad"],
+      "safe_min_score": 58.0,
+      "analog_min_score": 46.0,
+      "notes": "Standalone редуктор - отдельная комплектующая. Ключевые поля: посадка F05/F07/F10, квадрат штока, совместимый DN, тип четвертьоборота и назначение для затвора."
+    },
+    "vozduhootvod": {
+      "label": "Воздухоотводчик",
+      "allow_exact": false,
+      "approval_only": true,
+      "safe_required": ["family", "dn"],
+      "safe_min_score": 50.0,
+      "notes": "Для воздухоотводчиков даже при совпадении DN требуется проверка ориентации, типа резьбы и корпуса."
+    },
+    "filter": {
+      "label": "Фильтр",
+      "allow_exact": false,
+      "safe_required": ["family", "dn"],
+      "safe_min_score": 58.0,
+      "analog_min_score": 46.0,
+      "notes": "Для фильтров ключевыми считаются семейство и DN; исполнение, магнитная вставка и производитель требуют проверки."
+    },
+    "compensator": {
+      "label": "Компенсатор",
+      "allow_exact": false,
+      "approval_only": true,
+      "safe_required": ["family", "dn"],
+      "safe_min_score": 52.0,
+      "analog_min_score": 40.0,
+      "notes": "Для компенсаторов DN обязателен, но длина, тип и присоединение нужно согласовывать."
+    },
+    "zadvizhka": {
+      "label": "Задвижка",
+      "allow_exact": false,
+      "approval_only": true,
+      "safe_required": ["family", "dn"],
+      "safe_min_score": 58.0,
+      "analog_min_score": 42.0,
+      "notes": "Для задвижек DN обязателен; редуктор, штурвал и электропривод - это исполнение/способ управления, а не отдельное семейство."
+    },
+    "kran": {
+      "label": "Кран",
+      "allow_exact": false,
+      "approval_only": true,
+      "safe_required": ["family", "inch"],
+      "safe_min_score": 56.0,
+      "analog_min_score": 46.0,
+      "notes": "Для кранов обязательны семейство и размер присоединения; редуктор, ручка и привод - это исполнение, а не отдельное семейство."
+    },
+    "manometer": {
+      "label": "Манометр",
+      "allow_exact": false,
+      "approval_only": true,
+      "safe_required": ["family", "pressure_range_mpa"],
+      "safe_min_score": 56.0,
+      "analog_min_score": 44.0,
+      "notes": "Для манометров важны диапазон давления, размер корпуса, присоединение и расположение штуцера."
+    },
+    "patrubok": {
+      "label": "Патрубок",
+      "allow_exact": true,
+      "exact_required": ["family", "subfamily", "dn"],
+      "exact_min_score": 76.0,
+      "safe_required": ["family", "subfamily", "dn"],
+      "safe_min_score": 62.0,
+      "notes": "Для патрубков ключевой признак - подтип ПДС/ППС/ПФГ и DN. Отличия по длине и покрытию требуют проверки."
+    },
+    "pozharka": {
+      "label": "Пожарка",
+      "allow_exact": false,
+      "approval_only": true,
+      "safe_required": ["family", "dn"],
+      "safe_min_score": 62.0,
+      "analog_min_score": 48.0,
+      "notes": "Пожарные узлы и фасонка должны сохранять схему присоединения и основной размер."
+    },
+    "schetchik": {
+      "label": "Счетчик",
+      "allow_exact": false,
+      "approval_only": true,
+      "safe_required": ["family", "dn", "meter_type"],
+      "safe_min_score": 58.0,
+      "analog_min_score": 46.0,
+      "notes": "Для счетчиков критичны тип, DN и интерфейс/импульсный выход; policy остается консервативной."
+    },
+    "chugun_fason": {
+      "label": "Чугунные фасонные части",
+      "allow_exact": false,
+      "approval_only": true,
+      "safe_required": ["family", "dn"],
+      "safe_min_score": 60.0,
+      "analog_min_score": 46.0,
+      "notes": "Для чугунной фасонки нужно отдельно проверять тип соединения и покрытие."
+    }
+  }
+}
