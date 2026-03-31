@@ -1,2 +1,5 @@
+[phases.setup]
+aptPkgs = ["python3", "python3-pip"]
+
 [phases.install]
-cmds = ["pip install -r requirements-api.txt"]
+cmds = ["python3 -m pip install -r requirements-api.txt"]
