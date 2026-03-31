@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>1C Order Matching</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="login-screen" class="screen active">
+  <div class="login-card">
+    <div class="login-logo">1C Matching</div>
+    <p class="login-subtitle">Сопоставление заявок с остатками</p>
+    <form id="login-form">
+      <input type="password" id="login-password" placeholder="Пароль" autocomplete="current-password" required>
+      <button type="submit" class="btn btn-primary btn-full">Войти</button>
+      <p id="login-error" class="error-text"></p>
+    </form>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app-screen" class="screen">
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <span class="header-logo">1C Matching</span>
+    </div>
+    <div class="header-right">
+      <button id="btn-history" class="btn btn-ghost" onclick="showHistory()">История</button>
+      <button id="btn-logout" class="btn btn-ghost" onclick="logout()">Выйти</button>
+    </div>
+  </header>
+
+  <!-- Upload area -->
+  <div id="upload-section" class="section">
+    <div id="drop-zone" class="drop-zone">
+      <div class="drop-zone-content">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+        </svg>
+        <p class="drop-zone-text">Перетащите файл заявки сюда</p>
+        <p class="drop-zone-hint">или нажмите для выбора файла</p>
+        <p class="drop-zone-formats">xlsx, xlsm, csv, txt, docx, pdf, png, jpg, tif</p>
+      </div>
+      <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv,.txt,.docx,.pdf,.png,.jpg,.jpeg,.tif,.tiff,.webp" hidden>
+    </div>
+  </div>
+
+  <!-- Progress -->
+  <div id="progress-section" class="section" style="display:none">
+    <div class="progress-card">
+      <div class="spinner"></div>
+      <p id="progress-text">Обработка файла...</p>
+      <p id="progress-detail" class="text-muted"></p>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div id="results-section" class="section" style="display:none">
+    <!-- Stats bar -->
+    <div class="stats-bar">
+      <div class="stat stat-exact">
+        <span class="stat-value" id="stat-exact">0</span>
+        <span class="stat-label">Найдено</span>
+      </div>
+      <div class="stat stat-safe">
+        <span class="stat-value" id="stat-safe">0</span>
+        <span class="stat-label">Безопасный аналог</span>
+      </div>
+      <div class="stat stat-approval">
+        <span class="stat-value" id="stat-approval">0</span>
+        <span class="stat-label">На согласование</span>
+      </div>
+      <div class="stat stat-approved">
+        <span class="stat-value" id="stat-approved">0</span>
+        <span class="stat-label">Одобрено</span>
+      </div>
+      <div class="stat stat-notfound">
+        <span class="stat-value" id="stat-notfound">0</span>
+        <span class="stat-label">Не найдено</span>
+      </div>
+    </div>
+
+    <!-- Filter tabs -->
+    <div class="filter-tabs">
+      <button class="tab active" onclick="filterRows('all')" data-filter="all">Все</button>
+      <button class="tab" onclick="filterRows('exact')" data-filter="exact">Найдено</button>
+      <button class="tab" onclick="filterRows('analog')" data-filter="analog">Аналоги</button>
+      <button class="tab" onclick="filterRows('approved')" data-filter="approved">Одобрено</button>
+      <button class="tab" onclick="filterRows('notfound')" data-filter="notfound">Не найдено</button>
+    </div>
+
+    <!-- Results table -->
+    <div class="table-wrap">
+      <table id="results-table">
+        <thead>
+          <tr>
+            <th class="col-pos">#</th>
+            <th class="col-status">Статус</th>
+            <th class="col-name">Заявка клиента</th>
+            <th class="col-qty">Кол-во</th>
+            <th class="col-match">Найдено в остатках / Аналог</th>
+            <th class="col-score">Score</th>
+            <th class="col-remaining">Остаток</th>
+            <th class="col-action">Действие</th>
+          </tr>
+        </thead>
+        <tbody id="results-body"></tbody>
+      </table>
+    </div>
+
+    <!-- Bottom actions -->
+    <div class="bottom-actions">
+      <button class="btn btn-primary btn-lg" onclick="exportFile()">
+        Сформировать КП для 1С
+      </button>
+      <button class="btn btn-secondary btn-lg" onclick="showUpload()">
+        Загрузить новый файл
+      </button>
+    </div>
+  </div>
+
+  <!-- History -->
+  <div id="history-section" class="section" style="display:none">
+    <h2>История обработок</h2>
+    <div id="history-list" class="history-list"></div>
+    <button class="btn btn-secondary" onclick="showUpload()">Назад</button>
+  </div>
+</div>
+
+<!-- Analog detail modal -->
+<div id="analog-modal" class="modal" style="display:none">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3>Выбор аналога</h3>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-subtitle" id="modal-order-name"></div>
+    <div id="analog-list" class="analog-list"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

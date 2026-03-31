@@ -1,0 +1,429 @@
+/* ===== State ===== */
+// On GitHub Pages, point to the Railway backend; locally use same origin.
+const API = window.location.hostname.endsWith('github.io')
+  ? (window.__RAILWAY_URL__ || 'https://REPLACE_WITH_RAILWAY_URL')
+  : '';
+let token = localStorage.getItem('auth_token') || '';
+let currentJob = null;
+let allRows = [];
+let currentFilter = 'all';
+let pendingApprovals = {};  // row_id -> analog code_1c
+
+/* ===== Init ===== */
+document.addEventListener('DOMContentLoaded', () => {
+  if (token) {
+    showApp();
+  } else {
+    showScreen('login-screen');
+  }
+
+  // Login form
+  document.getElementById('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const pw = document.getElementById('login-password').value;
+    const err = document.getElementById('login-error');
+    err.textContent = '';
+    try {
+      const res = await apiFetch('/api/login', 'POST', { password: pw });
+      token = res.token;
+      localStorage.setItem('auth_token', token);
+      showApp();
+    } catch (ex) {
+      err.textContent = ex.message || 'Неверный пароль';
+    }
+  });
+
+  // Drop zone
+  const dz = document.getElementById('drop-zone');
+  const fi = document.getElementById('file-input');
+
+  dz.addEventListener('click', () => fi.click());
+  fi.addEventListener('change', () => { if (fi.files[0]) handleFile(fi.files[0]); });
+
+  dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dragover'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+  dz.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dz.classList.remove('dragover');
+    if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+});
+
+/* ===== Screens ===== */
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+function showApp() {
+  showScreen('app-screen');
+  showUpload();
+}
+
+function showUpload() {
+  document.getElementById('upload-section').style.display = '';
+  document.getElementById('progress-section').style.display = 'none';
+  document.getElementById('results-section').style.display = 'none';
+  document.getElementById('history-section').style.display = 'none';
+  document.getElementById('file-input').value = '';
+}
+
+function showHistory() {
+  document.getElementById('upload-section').style.display = 'none';
+  document.getElementById('results-section').style.display = 'none';
+  document.getElementById('history-section').style.display = '';
+  loadHistory();
+}
+
+function logout() {
+  token = '';
+  localStorage.removeItem('auth_token');
+  showScreen('login-screen');
+}
+
+/* ===== API helper ===== */
+async function apiFetch(path, method = 'GET', body = null) {
+  const opts = {
+    method,
+    headers: { 'Authorization': `Bearer ${token}` },
+  };
+  if (body && !(body instanceof FormData)) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  } else if (body instanceof FormData) {
+    opts.body = body;
+  }
+  const res = await fetch(API + path, opts);
+  if (res.status === 401) {
+    token = '';
+    localStorage.removeItem('auth_token');
+    showScreen('login-screen');
+    throw new Error('Сессия истекла');
+  }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Ошибка сервера');
+  return data;
+}
+
+/* ===== File upload ===== */
+async function handleFile(file) {
+  document.getElementById('upload-section').style.display = 'none';
+  document.getElementById('progress-section').style.display = '';
+  document.getElementById('progress-text').textContent = 'Обработка файла...';
+  document.getElementById('progress-detail').textContent = file.name;
+
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const data = await apiFetch('/api/upload', 'POST', fd);
+    currentJob = data;
+    allRows = data.rows || [];
+    pendingApprovals = {};
+    renderResults(data);
+  } catch (ex) {
+    document.getElementById('progress-text').textContent = 'Ошибка обработки';
+    document.getElementById('progress-detail').textContent = ex.message;
+  }
+}
+
+/* ===== Results ===== */
+function renderResults(data) {
+  document.getElementById('progress-section').style.display = 'none';
+  document.getElementById('results-section').style.display = '';
+
+  // Stats
+  const counts = data.status_counts || {};
+  const exactCount = (counts['Найдено полностью'] || 0) + (counts['Найдено частично'] || 0);
+  const safeCount = counts['Безопасный аналог'] || 0;
+  const approvalCount = counts['Нужна проверка аналога'] || 0;
+  const approvedCount = counts['Одобрена замена'] || 0;
+  const notfoundCount = counts['Не найдено'] || 0;
+
+  document.getElementById('stat-exact').textContent = exactCount;
+  document.getElementById('stat-safe').textContent = safeCount;
+  document.getElementById('stat-approval').textContent = approvalCount;
+  document.getElementById('stat-approved').textContent = approvedCount;
+  document.getElementById('stat-notfound').textContent = notfoundCount;
+
+  filterRows(currentFilter);
+}
+
+const STATUS_MAP = {
+  'Найдено полностью':     { cls: 'exact',    label: 'Найдено' },
+  'Найдено частично':      { cls: 'exact',    label: 'Найдено ч.' },
+  'Безопасный аналог':     { cls: 'safe',     label: 'Аналог ✓' },
+  'Нужна проверка аналога':{ cls: 'approval', label: 'На проверку' },
+  'Одобрена замена':       { cls: 'approved', label: 'Одобрено' },
+  'Не найдено':            { cls: 'notfound', label: 'Не найдено' },
+};
+
+function filterRows(filter) {
+  currentFilter = filter;
+  document.querySelectorAll('.tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.filter === filter);
+  });
+
+  let rows = allRows;
+  if (filter === 'exact') {
+    rows = allRows.filter(r => r.status === 'Найдено полностью' || r.status === 'Найдено частично');
+  } else if (filter === 'analog') {
+    rows = allRows.filter(r => r.status === 'Безопасный аналог' || r.status === 'Нужна проверка аналога');
+  } else if (filter === 'approved') {
+    rows = allRows.filter(r => r.status === 'Одобрена замена');
+  } else if (filter === 'notfound') {
+    rows = allRows.filter(r => r.status === 'Не найдено');
+  }
+
+  renderTable(rows);
+}
+
+function renderTable(rows) {
+  const tbody = document.getElementById('results-body');
+  tbody.innerHTML = '';
+
+  rows.forEach((row, i) => {
+    const info = STATUS_MAP[row.status] || { cls: 'notfound', label: row.status };
+    const tr = document.createElement('tr');
+    tr.className = `row-${info.cls}`;
+
+    const matchCell = buildMatchCell(row);
+    const actionCell = buildActionCell(row);
+
+    tr.innerHTML = `
+      <td>${row.position || (i + 1)}</td>
+      <td><span class="badge badge-${info.cls}">${info.label}</span></td>
+      <td>
+        <div class="match-name">${esc(row.name || '')}</div>
+        ${row.mark ? `<div class="match-code">${esc(row.mark)}</div>` : ''}
+        ${row.vendor ? `<div class="match-comment">${esc(row.vendor)}</div>` : ''}
+      </td>
+      <td class="col-qty">${row.requested_qty ?? ''}</td>
+      <td>${matchCell}</td>
+      <td class="col-score">${row.confidence != null ? row.confidence : ''}</td>
+      <td class="col-remaining">${row.available_qty != null ? row.available_qty : ''}</td>
+      <td>${actionCell}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function buildMatchCell(row) {
+  if (row.approved_analog) {
+    const a = row.approved_analog;
+    return `<div class="match-name">${esc(a.name)}</div>
+            <div class="match-code">${esc(a.code_1c)}</div>
+            <div class="match-comment" style="color:var(--approved)">Одобрено менеджером</div>`;
+  }
+  if (row.matched_name) {
+    return `<div class="match-name">${esc(row.matched_name)}</div>
+            <div class="match-code">${esc(row.matched_code || '')}</div>
+            ${row.comment ? `<div class="match-comment">${esc(row.comment)}</div>` : ''}`;
+  }
+  if (row.status === 'Нужна проверка аналога' && row.analogs && row.analogs.length) {
+    const a = row.analogs[0];
+    return `<div class="match-name">${esc(a.name)}</div>
+            <div class="match-code">${esc(a.code_1c)}</div>
+            <div class="match-comment">Лучший аналог (score ${a.score})</div>`;
+  }
+  return `<span style="color:var(--text-muted)">—</span>`;
+}
+
+function buildActionCell(row) {
+  if (row.status === 'Нужна проверка аналога' && !row.approved_analog) {
+    const hasAnalogs = row.analogs && row.analogs.length > 0;
+    if (hasAnalogs) {
+      return `<button class="btn btn-approve btn-sm" onclick="openModal('${row.id}')">Выбрать аналог</button>`;
+    }
+  }
+  if (row.status === 'Одобрена замена') {
+    return `<button class="btn btn-secondary btn-sm" onclick="openModal('${row.id}')">Изменить</button>`;
+  }
+  if (row.status === 'Безопасный аналог' && row.analogs && row.analogs.length > 1) {
+    return `<button class="btn btn-ghost btn-sm" onclick="openModal('${row.id}')">Другой аналог</button>`;
+  }
+  return '';
+}
+
+function esc(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/* ===== Analog Modal ===== */
+let modalRowId = null;
+
+function openModal(rowId) {
+  modalRowId = rowId;
+  const row = allRows.find(r => r.id === rowId);
+  if (!row) return;
+
+  document.getElementById('modal-order-name').textContent =
+    `${row.name}${row.mark ? ' · ' + row.mark : ''}${row.vendor ? ' · ' + row.vendor : ''}`;
+
+  const list = document.getElementById('analog-list');
+  list.innerHTML = '';
+
+  (row.analogs || []).forEach(a => {
+    const isSelected = row.approved_analog?.code_1c === a.code_1c
+      || pendingApprovals[rowId] === a.code_1c;
+    const card = document.createElement('div');
+    card.className = 'analog-card';
+    card.innerHTML = `
+      <div class="analog-info">
+        <div class="analog-name">${esc(a.name)}</div>
+        <div class="analog-code">${esc(a.code_1c)}</div>
+        <div class="analog-meta">
+          <span>Score: <strong>${a.score}</strong></span>
+          ${a.remaining != null ? `<span>Остаток: <strong>${a.remaining}</strong></span>` : ''}
+          ${a.price != null ? `<span>Цена: <strong>${a.price}</strong></span>` : ''}
+        </div>
+        ${a.reasons && a.reasons.length ? `<div class="analog-reasons">${a.reasons.map(esc).join('; ')}</div>` : ''}
+      </div>
+      <div class="analog-action">
+        <button class="btn btn-approve-sm ${isSelected ? 'btn-selected' : ''}"
+          onclick="selectAnalog('${rowId}', '${esc(a.code_1c)}')">
+          ${isSelected ? '✓ Выбрано' : 'Выбрать'}
+        </button>
+      </div>
+    `;
+    list.appendChild(card);
+  });
+
+  document.getElementById('analog-modal').style.display = 'flex';
+}
+
+function closeModal() {
+  document.getElementById('analog-modal').style.display = 'none';
+  modalRowId = null;
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeModal();
+});
+
+document.getElementById('analog-modal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('analog-modal')) closeModal();
+});
+
+async function selectAnalog(rowId, code) {
+  pendingApprovals[rowId] = code;
+
+  // Send to server
+  try {
+    const res = await apiFetch(`/api/jobs/${currentJob.job_id}/approve`, 'POST', {
+      approvals: { [rowId]: code }
+    });
+
+    // Update local state
+    const row = allRows.find(r => r.id === rowId);
+    if (row) {
+      const analog = row.analogs.find(a => a.code_1c === code);
+      if (analog) {
+        row.approved_analog = analog;
+        row.status = 'Одобрена замена';
+      }
+    }
+
+    // Update stats from server response
+    if (currentJob && res.status_counts) {
+      currentJob.status_counts = res.status_counts;
+    }
+
+    closeModal();
+    renderResults(currentJob);
+  } catch (ex) {
+    alert('Ошибка: ' + ex.message);
+  }
+}
+
+/* ===== Export ===== */
+async function exportFile() {
+  if (!currentJob) return;
+  try {
+    const res = await fetch(`${API}/api/jobs/${currentJob.job_id}/export`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || 'Ошибка экспорта');
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'КП_для_1С.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (ex) {
+    alert('Ошибка экспорта: ' + ex.message);
+  }
+}
+
+/* ===== History ===== */
+async function loadHistory() {
+  const list = document.getElementById('history-list');
+  list.innerHTML = '<p style="color:var(--text-muted)">Загрузка...</p>';
+  try {
+    const data = await apiFetch('/api/jobs');
+    const jobs = data.jobs || [];
+    if (!jobs.length) {
+      list.innerHTML = '<p style="color:var(--text-muted)">История пуста</p>';
+      return;
+    }
+    list.innerHTML = '';
+    jobs.forEach(job => {
+      const counts = job.status_counts || {};
+      const exactN = (counts['Найдено полностью'] || 0) + (counts['Найдено частично'] || 0);
+      const analogN = (counts['Безопасный аналог'] || 0) + (counts['Нужна проверка аналога'] || 0)
+                    + (counts['Одобрена замена'] || 0);
+      const notfoundN = counts['Не найдено'] || 0;
+
+      const date = job.created_at
+        ? new Date(job.created_at * 1000).toLocaleString('ru-RU')
+        : '';
+
+      const item = document.createElement('div');
+      item.className = 'history-item';
+      item.innerHTML = `
+        <div>
+          <div class="history-name">${esc(job.filename || job.job_id)}</div>
+          <div class="history-date">${date}</div>
+        </div>
+        <div class="history-stats">
+          <span style="color:var(--exact)">✓ ${exactN}</span>
+          <span style="color:var(--approval)">~ ${analogN}</span>
+          <span style="color:var(--notfound)">✗ ${notfoundN}</span>
+          <span style="color:var(--text-muted)">${job.total_rows} позиций</span>
+        </div>
+      `;
+      item.addEventListener('click', () => openHistoryJob(job.job_id));
+      list.appendChild(item);
+    });
+  } catch (ex) {
+    list.innerHTML = `<p style="color:var(--notfound)">${esc(ex.message)}</p>`;
+  }
+}
+
+async function openHistoryJob(jobId) {
+  document.getElementById('history-section').style.display = 'none';
+  document.getElementById('progress-section').style.display = '';
+  document.getElementById('progress-text').textContent = 'Загрузка результатов...';
+  document.getElementById('progress-detail').textContent = '';
+
+  try {
+    const data = await apiFetch(`/api/jobs/${jobId}`);
+    currentJob = { ...data, job_id: jobId };
+    allRows = data.rows || [];
+    pendingApprovals = {};
+    renderResults(data);
+  } catch (ex) {
+    document.getElementById('progress-text').textContent = 'Ошибка';
+    document.getElementById('progress-detail').textContent = ex.message;
+  }
+}
