@@ -47,6 +47,23 @@
       </div>
       <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv,.txt,.docx,.pdf,.png,.jpg,.jpeg,.tif,.tiff,.webp" hidden>
     </div>
+
+    <div class="text-input-divider">
+      <span>или введите список товаров текстом</span>
+    </div>
+
+    <div class="text-input-block">
+      <textarea
+        id="text-input"
+        class="text-input-area"
+        placeholder="Вставьте список позиций — по одной на строку. Например:&#10;Кран шаровой латунный вр-вр 1/2 10 шт&#10;Фланец плоский DN80 PN16 тип 01 Ст.20 ГОСТ 33259&#10;Задвижка с обрезиненным клином DN50 PN16 со штурвалом"
+        rows="6"
+      ></textarea>
+      <div class="text-input-actions">
+        <span class="text-input-hint">Каждая строка — отдельная позиция. Можно указать количество в конце строки.</span>
+        <button class="btn btn-primary" id="btn-process-text" onclick="handleTextInput()">Обработать список</button>
+      </div>
+    </div>
   </div>
 
   <!-- Progress -->

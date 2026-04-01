@@ -175,6 +175,62 @@ body {
   border-radius: 20px;
 }
 
+/* ===== Text input block ===== */
+.text-input-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.text-input-divider::before,
+.text-input-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.text-input-block {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.text-input-area {
+  width: 100%;
+  padding: 16px;
+  border: none;
+  outline: none;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text);
+  resize: vertical;
+  min-height: 130px;
+  background: transparent;
+  line-height: 1.6;
+}
+.text-input-area::placeholder { color: var(--text-muted); }
+.text-input-area:focus { background: #fafbff; }
+
+.text-input-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  gap: 12px;
+}
+
+.text-input-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  flex: 1;
+}
+
 /* ===== Progress ===== */
 .progress-card {
   background: var(--surface);

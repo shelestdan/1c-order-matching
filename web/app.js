@@ -56,6 +56,14 @@ document.addEventListener('DOMContentLoaded', () => {
       runManualSearch();
     }
   });
+
+  // Ctrl+Enter in textarea to submit
+  document.getElementById('text-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      handleTextInput();
+    }
+  });
 });
 
 /* ===== Screens ===== */
@@ -134,6 +142,24 @@ async function handleFile(file) {
     document.getElementById('progress-text').textContent = 'Ошибка обработки';
     document.getElementById('progress-detail').textContent = ex.message;
   }
+}
+
+/* ===== Text input ===== */
+async function handleTextInput() {
+  const textarea = document.getElementById('text-input');
+  const text = textarea.value.trim();
+  if (!text) {
+    textarea.focus();
+    return;
+  }
+  const lines = text.split('\n').filter(l => l.trim());
+  if (lines.length === 0) return;
+
+  // Wrap as plain-text file and reuse existing upload pipeline
+  const blob = new Blob([text], { type: 'text/plain' });
+  const file = new File([blob], 'manual_input.txt', { type: 'text/plain' });
+  textarea.value = '';
+  await handleFile(file);
 }
 
 /* ===== Results ===== */
