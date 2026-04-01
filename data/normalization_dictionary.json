@@ -1,0 +1,2759 @@
+{
+  "metadata": {
+    "version": "4.0.0",
+    "generated_on": "2026-04-01",
+    "description": "Объединённый словарь нормализации клиентских товарных строк. Содержит family_triggers, phrase_aliases, attribute_aliases, noise_patterns, family_specific_hints. Это справочный слой (не подключён к коду напрямую) — оперативная логика живёт в parser_hints.json и vgs2000_matching_dictionary.json.",
+    "source_files": [
+      "statistic/data/customer_query_normalization_dictionary.json",
+      "data/parser_hints.json"
+    ],
+    "normalization_principles": [
+      "Нормализуем формулировки клиента в признаки, но не подменяем logic допустимости аналогов.",
+      "Не смешиваем synonym normalization и substitution logic.",
+      "Не коэрцируем материал, размер или исполнение в более узкую складскую позицию без явного признака.",
+      "Если фраза описывает исполнение товара, она не должна превращаться в отдельное family."
+    ],
+    "structure_notes": {
+      "family_triggers": "Фразы/паттерны → семейство товара. Работают ДО токенизации.",
+      "phrase_aliases": "Многословные выражения → каноническая форма. Порядок важен — длинные фразы первыми.",
+      "attribute_aliases": "Сокращения технических атрибутов → каноническое значение. По категориям.",
+      "noise_patterns": "Слова/фразы для удаления — не влияют на матчинг, но загрязняют токены.",
+      "family_specific_hints": "Правила нормализации, специфичные для семейства товара.",
+      "stock_derived_aliases": "Сокращения, встречающиеся ТОЛЬКО в остатках 1С, и их расшифровка.",
+      "canonical_examples": "Эталонные пары клиент→остаток для валидации словаря."
+    }
+  },
+  "family_triggers": {
+    "flange": {
+      "aliases": [
+        "фланец",
+        "комплект фланцев",
+        "плоский приварной",
+        "воротниковый",
+        "приварной встык",
+        "тип 01",
+        "тип 11",
+        "фл.",
+        "фланец плоский",
+        "фланец воротниковый",
+        "фланец приварной",
+        "фланец стальной",
+        "заглушка фланцевая",
+        "заглушка фл."
+      ],
+      "stock_forms": [
+        "Фланец плоский 80-16-01-1-В-Ст.20 ГОСТ 33259",
+        "Фланец воротниковый 50-16-11-1-В-Ст.20-IV ГОСТ 33259"
+      ],
+      "notes": "В запросах клиент чаще пишет словами, а в остатках форма кодированная DN-PN-type-row-face-material.",
+      "negative_context": [
+        "фланец-гладкий конец",
+        "пфг"
+      ]
+    },
+    "perehod": {
+      "aliases": [
+        "переход",
+        "муфта переходная",
+        "муфта перех.",
+        "концентрический",
+        "эксцентрический",
+        "редукция",
+        "фланцевый переход",
+        "переход концентрический",
+        "переход эксцентрический",
+        "переход стальной",
+        "переход полипропиленовый"
+      ],
+      "stock_forms": [
+        "Переход К-1-25х20 ... ГОСТ 17378",
+        "Муфта переходная PP-R DN 32-25 Белая PRO AQUA",
+        "Муфта переходная 50х40 PPR KALDE"
+      ],
+      "notes": "Для PPR клиентское слово 'переход' часто соответствует складской форме 'муфта переходная'."
+    },
+    "tee": {
+      "aliases": [
+        "тройник",
+        "тройник переходной",
+        "тройник равнопроходной",
+        "тройник фланцевый",
+        "тройник электросварной",
+        "тройник стальной",
+        "тройник оцинкованный",
+        "тройник ppr",
+        "тройник полипропиленовый"
+      ],
+      "stock_forms": [
+        "Тройник фланцевый ТФ 50х32 сталь",
+        "Тройник чугунный переходной 32х25"
+      ],
+      "notes": "Нужно выделять три размера и не сводить тройники к двумерной логике перехода."
+    },
+    "elbow": {
+      "aliases": [
+        "отвод",
+        "колено",
+        "угольник",
+        "угол",
+        "отвод крутоизогнутый",
+        "отвод стальной",
+        "колено 90",
+        "колено 45",
+        "отвод 90",
+        "отвод 45",
+        "отвод 30",
+        "отвод 60",
+        "угол 90",
+        "угол 45"
+      ],
+      "stock_forms": [
+        "Отвод 45-2-89х4,0 Ст.20 ГОСТ 17375",
+        "Колено 90° грувлок D50"
+      ],
+      "notes": "Угол, тип присоединения и материал для колен/отводов критичны.",
+      "negative_context": [
+        "тройник",
+        "переход"
+      ]
+    },
+    "zadvizhka": {
+      "aliases": [
+        "задвижка",
+        "задвижка клиновая",
+        "с обрезиненным клином",
+        "задв.",
+        "задвижка шиберная",
+        "задвижка чугунная",
+        "задвижка с обрезиненным клином"
+      ],
+      "stock_forms": [
+        "Задвижка DENDOR тип 47GV DN 50 PN10/PN16",
+        "Задвижка 30ч39р Ду100 Ру16"
+      ],
+      "notes": "Клиент часто пишет функцию и исполнение, а остаток хранит модель."
+    },
+    "zatvor": {
+      "aliases": [
+        "затвор",
+        "затвор дисковый",
+        "затвор поворотный",
+        "дисковый затвор",
+        "поворотный затвор"
+      ],
+      "stock_forms": [
+        "Затвор FAF 3550 Ду80 Ру16 межфл., корпус-чугун, диск-чугун EPDM рукоятка",
+        "Затвор поворот.межфл.чуг./чуг. EPDM Ду80 Ру16 с эл/пр ..."
+      ],
+      "notes": "Оператор 'рукоятка/редуктор/электропривод' должен быть полем исполнения, а не отдельным family.",
+      "execution_modifiers": {
+        "_comment": "Эти слова — модификаторы затвора, а не отдельный family",
+        "с редуктором": {
+          "attr": "actuator",
+          "value": "gearbox"
+        },
+        "с электроприводом": {
+          "attr": "actuator",
+          "value": "electric"
+        },
+        "с пневмоприводом": {
+          "attr": "actuator",
+          "value": "pneumatic"
+        },
+        "с рукояткой": {
+          "attr": "actuator",
+          "value": "lever"
+        },
+        "рукоятка": {
+          "attr": "actuator",
+          "value": "lever"
+        }
+      }
+    },
+    "gearbox": {
+      "aliases": [
+        "редуктор",
+        "четвертьоборотный редуктор"
+      ],
+      "stock_forms": [
+        "Редуктор F07 14х14 д/затв Ду125-150 четвертьоборотный",
+        "(РВЗ) Редуктор д/затв Ду 200 четвертьоборотный (F10 17X17)"
+      ],
+      "notes": "Standalone gearbox отдельное family; не путать с 'затвор с редуктором'.",
+      "require_standalone": true
+    },
+    "kran": {
+      "aliases": [
+        "кран",
+        "кран шаровой",
+        "поливочный кран",
+        "кран для манометра",
+        "шаровый кран",
+        "шаровой кран",
+        "кран латунный",
+        "кран фланцевый",
+        "кран трехходовой",
+        "кран дренажный",
+        "кран - фильтр",
+        "кран-фильтр"
+      ],
+      "stock_forms": [
+        "Кран шаровой латунный 11Б27п1-15 г/г (вн./вн.резьба), ручка \"рычаг\"",
+        "Кран 1/2\" вн.-вн. шаровый бабочка VT Base VT.217"
+      ],
+      "notes": "Тип крана, thread form и тип ручки клиент обычно задаёт словами."
+    },
+    "filter": {
+      "aliases": [
+        "фильтр",
+        "фильтр сетчатый",
+        "фильтр магнитный",
+        "грязевик",
+        "фильтр латунный",
+        "фильтр фланцевый",
+        "косой фильтр"
+      ],
+      "stock_forms": [
+        "Фильтр механической очистки косой ...",
+        "Фильтр ... с магнитной вставкой ..."
+      ],
+      "notes": "Магнитный/сетчатый/косой нельзя считать шумом: это признаки подсемейства."
+    },
+    "compensator": {
+      "aliases": [
+        "компенсатор",
+        "гибкая вставка",
+        "антивибрационный",
+        "компенсатор резиновый",
+        "компенсатор сильфонный",
+        "компенсатор фланцевый"
+      ],
+      "stock_forms": [
+        "Компенсатор фланцевый Ду50 сталь L=2400"
+      ],
+      "notes": "Длина и исполнение для компенсаторов критичны."
+    },
+    "patrubok": {
+      "aliases": [
+        "патрубок",
+        "патрубок до счетчика",
+        "патрубок после счетчика",
+        "фланец-гладкий конец",
+        "пфг",
+        "пдс",
+        "ппс"
+      ],
+      "stock_forms": [
+        "Патрубок до счетчика ПДС Ду.40",
+        "Патрубок после счетчика ППС Ду.50",
+        "Патрубок ПФГ-100 чугунный фланцевый гладкий L=900 мм"
+      ],
+      "notes": "PDS/PPS/PFG желательно хранить как подсемейство и service-side, а не как свободный текст."
+    },
+    "schetchik": {
+      "aliases": [
+        "счетчик",
+        "счетчик воды",
+        "турбинный",
+        "крыльчатый",
+        "комбинированный",
+        "водомер",
+        "расходомер",
+        "теплосчетчик",
+        "водосчетчик"
+      ],
+      "stock_forms": [
+        "Счетчик ... с импульсным выходом",
+        "Счетчик ... RS-485"
+      ],
+      "notes": "Тип счётчика и вид выхода обязательны для аккуратного shortlist."
+    },
+    "manometer": {
+      "aliases": [
+        "манометр",
+        "мп50м2"
+      ],
+      "stock_forms": [
+        "Манометр ...",
+        "Кран ... для манометра ..."
+      ],
+      "notes": "Диапазон давления, диаметр корпуса и тип присоединения важнее словесной похожести."
+    },
+    "vozduhootvod": {
+      "aliases": [
+        "воздухоотводчик",
+        "автоматический воздухоотводчик",
+        "вантуз",
+        "автовоздухоотводчик",
+        "воздушный клапан"
+      ],
+      "stock_forms": [
+        "Воздухоотводчик латунный автоматический Ду.15 (1/2\") нар/р прямой",
+        "Вантуз (воздухоотводчик) чугунный фланцевый DN80 PN10/16"
+      ],
+      "notes": "Нужно различать автоматические латунные воздухоотводчики и чугунные вантузы."
+    },
+    "pipe": {
+      "aliases": [
+        "труба",
+        "водогазопроводная",
+        "электросварная",
+        "вчшг",
+        "трубы",
+        "трубка",
+        "трубопровод",
+        "труба стальная",
+        "труба электросварная",
+        "труба профильная",
+        "труба вгп",
+        "труба водогазопроводная",
+        "труба полипропиленовая",
+        "труба ppr",
+        "труба pp-r",
+        "труба пэ",
+        "труба пнд",
+        "труба pe",
+        "труба чугунная",
+        "труба вчшг",
+        "труба из сшитого полиэтилена",
+        "pex-a",
+        "pert",
+        "труба гофрированная"
+      ],
+      "stock_forms": [
+        "Труба Ду200 ВЧШГ ...",
+        "Труба электросварная 57-3,5 ГОСТ 10704-91/10705-80"
+      ],
+      "notes": "Нужно отделять DN от внешнего диаметра и учитывать ГОСТ/стенку.",
+      "negative_context": [
+        "для затвора",
+        "для задвижки",
+        "патрубок"
+      ]
+    },
+    "adapter": {
+      "aliases": [
+        "адаптер",
+        "адаптер фланцевый"
+      ],
+      "stock_forms": [
+        "Адаптер фланцевый под муфту ..."
+      ],
+      "notes": "Для адаптера важно не перепутать family с flange или coupling."
+    },
+    "klapan": {
+      "aliases": [
+        "клапан",
+        "клапан обратный",
+        "обратный клапан",
+        "клапан предохранительный",
+        "клапан запорный",
+        "клапан балансировочный",
+        "клапан терморегулирующий",
+        "клапан редукционный"
+      ]
+    },
+    "mufta": {
+      "aliases": [
+        "муфта",
+        "муфта соединительная",
+        "муфта комбинированная",
+        "американка",
+        "муфта разъемная",
+        "муфта чугунная",
+        "муфта оцинкованная"
+      ],
+      "negative_context": [
+        "муфта переходная",
+        "муфта перех.",
+        "грувлок"
+      ]
+    },
+    "zaglushka": {
+      "aliases": [
+        "заглушка",
+        "пробка",
+        "заглушка резьбовая",
+        "заглушка эллиптическая",
+        "заглушка стальная",
+        "днище",
+        "заглушка пэ"
+      ],
+      "negative_context": [
+        "заглушка фланцевая"
+      ]
+    },
+    "grooved": {
+      "aliases": [
+        "грувлок",
+        "grooved",
+        "victaulic",
+        "муфта грувлок",
+        "под муфту грувлок",
+        "хомут грувлок"
+      ]
+    },
+    "manometr": {
+      "aliases": [
+        "манометр",
+        "термоманометр",
+        "термометр"
+      ]
+    },
+    "homut": {
+      "aliases": [
+        "хомут",
+        "хомут ремонтный",
+        "хомут обжимной",
+        "хомут трубный"
+      ]
+    }
+  },
+  "phrase_aliases": {
+    "grooved_connection": {
+      "aliases": [
+        "грувлок",
+        "grooved",
+        "под муфту"
+      ],
+      "normalized": {
+        "connection": "grooved"
+      },
+      "applies_to_families": [
+        "elbow",
+        "tee",
+        "adapter",
+        "cap",
+        "coupling"
+      ],
+      "stability": "safe"
+    },
+    "rubber_wedge": {
+      "aliases": [
+        "с обрезиненным клином"
+      ],
+      "normalized": {
+        "wedge_type": "rubberized"
+      },
+      "applies_to_families": [
+        "zadvizhka"
+      ],
+      "stability": "safe"
+    },
+    "handwheel_operator": {
+      "aliases": [
+        "со штурвалом",
+        "ручное управление"
+      ],
+      "normalized": {
+        "operator": "handwheel"
+      },
+      "applies_to_families": [
+        "zadvizhka",
+        "zatvor",
+        "kran"
+      ],
+      "stability": "safe"
+    },
+    "gearbox_operator_phrase": {
+      "aliases": [
+        "с редуктором"
+      ],
+      "normalized": {
+        "operator": "gearbox"
+      },
+      "applies_to_families": [
+        "zatvor",
+        "zadvizhka",
+        "kran"
+      ],
+      "stability": "safe",
+      "note": "Фраза описывает исполнение основной арматуры. Слово 'редуктор' в начале строки обрабатывается как отдельное family gearbox."
+    },
+    "electric_actuator_operator": {
+      "aliases": [
+        "с электроприводом",
+        "под электропривод",
+        "с эл/пр",
+        "с эл.пр"
+      ],
+      "normalized": {
+        "operator": "electric_actuator"
+      },
+      "applies_to_families": [
+        "zatvor",
+        "zadvizhka",
+        "kran"
+      ],
+      "stability": "safe"
+    },
+    "manometer_service": {
+      "aliases": [
+        "для манометра"
+      ],
+      "normalized": {
+        "service_for": "manometer"
+      },
+      "applies_to_families": [
+        "kran"
+      ],
+      "stability": "safe"
+    },
+    "magnetic_insert_filter": {
+      "aliases": [
+        "с магнитной вставкой",
+        "магнитный",
+        "магнитно-механический"
+      ],
+      "normalized": {
+        "insert": "magnetic"
+      },
+      "applies_to_families": [
+        "filter"
+      ],
+      "stability": "review",
+      "note": "Слово 'магнитный' безопасно только в контексте фильтров; вне family filter может быть шумным."
+    },
+    "before_meter": {
+      "aliases": [
+        "до счетчика",
+        "пдс"
+      ],
+      "normalized": {
+        "meter_side": "before",
+        "subfamily": "pds"
+      },
+      "applies_to_families": [
+        "patrubok"
+      ],
+      "stability": "safe"
+    },
+    "after_meter": {
+      "aliases": [
+        "после счетчика",
+        "ппс"
+      ],
+      "normalized": {
+        "meter_side": "after",
+        "subfamily": "pps"
+      },
+      "applies_to_families": [
+        "patrubok"
+      ],
+      "stability": "safe"
+    },
+    "plain_end_flange_spigot": {
+      "aliases": [
+        "фланец-гладкий конец",
+        "фланцевый гладкий",
+        "пфг"
+      ],
+      "normalized": {
+        "subfamily": "pfg"
+      },
+      "applies_to_families": [
+        "patrubok",
+        "chugun_fason"
+      ],
+      "stability": "safe"
+    },
+    "flat_welded_flange_phrase": {
+      "aliases": [
+        "плоский приварной",
+        "тип 01"
+      ],
+      "normalized": {
+        "family": "flange",
+        "flange_type": "01",
+        "subtype": "flat_welded"
+      },
+      "applies_to_families": [
+        "flange"
+      ],
+      "stability": "safe"
+    },
+    "weld_neck_flange_phrase": {
+      "aliases": [
+        "воротниковый",
+        "приварной встык",
+        "тип 11"
+      ],
+      "normalized": {
+        "family": "flange",
+        "flange_type": "11",
+        "subtype": "weld_neck"
+      },
+      "applies_to_families": [
+        "flange"
+      ],
+      "stability": "safe"
+    },
+    "automatic_air_vent_phrase": {
+      "aliases": [
+        "автоматический воздухоотводчик",
+        "воздухоотводчик автоматический"
+      ],
+      "normalized": {
+        "family": "vozduhootvod",
+        "subfamily": "automatic"
+      },
+      "applies_to_families": [
+        "vozduhootvod"
+      ],
+      "stability": "safe"
+    },
+    "horizontal_cap_air_vent": {
+      "aliases": [
+        "с горизонтальным расположением колпачка"
+      ],
+      "normalized": {
+        "orientation": "horizontal_cap"
+      },
+      "applies_to_families": [
+        "vozduhootvod"
+      ],
+      "stability": "review"
+    },
+    "water_draw_ball_valve": {
+      "aliases": [
+        "поливочный кран",
+        "водоразборный"
+      ],
+      "normalized": {
+        "subfamily": "water_draw"
+      },
+      "applies_to_families": [
+        "kran"
+      ],
+      "stability": "safe"
+    },
+    "pneumatic_actuator_operator": {
+      "aliases": [
+        "с пневмоприводом"
+      ],
+      "normalized": {
+        "operator": "pneumatic_actuator"
+      },
+      "applies_to_families": [
+        "zatvor",
+        "zadvizhka",
+        "kran"
+      ],
+      "stability": "safe"
+    },
+    "lever_handle": {
+      "aliases": [
+        "с рукояткой",
+        "рукоятка"
+      ],
+      "normalized": {
+        "operator": "lever"
+      },
+      "applies_to_families": [
+        "zatvor",
+        "zadvizhka",
+        "kran"
+      ],
+      "stability": "safe"
+    },
+    "non_rising_stem": {
+      "aliases": [
+        "невыдвижной шток",
+        "невыдвижным штоком"
+      ],
+      "normalized": {
+        "stem_type": "non_rising"
+      },
+      "applies_to_families": [
+        "zadvizhka"
+      ],
+      "stability": "safe"
+    },
+    "rising_stem": {
+      "aliases": [
+        "выдвижной шток",
+        "выдвижным штоком"
+      ],
+      "normalized": {
+        "stem_type": "rising"
+      },
+      "applies_to_families": [
+        "zadvizhka"
+      ],
+      "stability": "safe"
+    },
+    "krutelyozog_bezshov": {
+      "aliases": [
+        "крутоизогнутый бесшовный",
+        "крутоизогнутый"
+      ],
+      "normalized": {
+        "bend_type": "short_radius_seamless"
+      },
+      "applies_to_families": [
+        "elbow"
+      ],
+      "stability": "safe"
+    },
+    "vgp_descriptor": {
+      "aliases": [
+        "водогазопроводная"
+      ],
+      "normalized": {
+        "pipe_type": "vgp"
+      },
+      "applies_to_families": [
+        "pipe"
+      ],
+      "stability": "safe"
+    },
+    "es_descriptor": {
+      "aliases": [
+        "электросварная"
+      ],
+      "normalized": {
+        "pipe_type": "electric_welded"
+      },
+      "applies_to_families": [
+        "pipe"
+      ],
+      "stability": "safe"
+    },
+    "pex_descriptor": {
+      "aliases": [
+        "из сшитого полиэтилена",
+        "сшитый полиэтилен"
+      ],
+      "normalized": {
+        "material": "pex"
+      },
+      "applies_to_families": [
+        "pipe"
+      ],
+      "stability": "safe"
+    },
+    "mechanical_cleaning_filter": {
+      "aliases": [
+        "механической очистки"
+      ],
+      "normalized": {
+        "filter_type": "mesh"
+      },
+      "applies_to_families": [
+        "filter"
+      ],
+      "stability": "safe"
+    },
+    "execution_variant": {
+      "aliases": [
+        "исп. 1",
+        "исп. 2",
+        "исполнение 1",
+        "исполнение 2"
+      ],
+      "normalized": {
+        "execution": "variant"
+      },
+      "applies_to_families": [
+        "elbow",
+        "perehod",
+        "tee"
+      ],
+      "stability": "safe",
+      "note": "Номер исполнения (1 или 2) парсится из строки отдельно."
+    },
+    "socket_joint": {
+      "aliases": [
+        "раструбное соединение"
+      ],
+      "normalized": {
+        "connection": "socket"
+      },
+      "applies_to_families": [
+        "pipe"
+      ],
+      "stability": "safe"
+    },
+    "coupling_union": {
+      "aliases": [
+        "муфта-штуцер"
+      ],
+      "normalized": {
+        "connection_feature": "coupling_male"
+      },
+      "applies_to_families": [
+        "mufta",
+        "kran"
+      ],
+      "stability": "safe"
+    },
+    "free_ring_flange_phrase": {
+      "aliases": [
+        "свободный на приварном кольце",
+        "на приварном кольце",
+        "тип 02"
+      ],
+      "normalized": {
+        "family": "flange",
+        "flange_type": "02",
+        "subtype": "free_ring"
+      },
+      "applies_to_families": [
+        "flange"
+      ],
+      "stability": "safe"
+    },
+    "vessel_flange_phrase": {
+      "aliases": [
+        "для сосудов",
+        "тип 21"
+      ],
+      "normalized": {
+        "family": "flange",
+        "flange_type": "21",
+        "subtype": "vessel"
+      },
+      "applies_to_families": [
+        "flange"
+      ],
+      "stability": "safe"
+    }
+  },
+  "attribute_aliases": {
+    "material": {
+      "steel_general": {
+        "aliases": [
+          "стальной",
+          "сталь",
+          "ст."
+        ],
+        "normalized": {
+          "material": "steel"
+        },
+        "stability": "review",
+        "note": "Нормализует только базовый материал. Не подменять в Ст.20 без явной марки."
+      },
+      "st20": {
+        "aliases": [
+          "ст.20",
+          "ст20"
+        ],
+        "normalized": {
+          "material": "steel",
+          "grade": "st20"
+        },
+        "stability": "safe"
+      },
+      "09g2s": {
+        "aliases": [
+          "09г2с"
+        ],
+        "normalized": {
+          "material": "steel",
+          "grade": "09g2s"
+        },
+        "stability": "safe"
+      },
+      "12x18h10t": {
+        "aliases": [
+          "12х18н10т"
+        ],
+        "normalized": {
+          "material": "stainless_steel",
+          "grade": "12x18h10t"
+        },
+        "stability": "safe"
+      },
+      "cast_iron": {
+        "aliases": [
+          "чугунный",
+          "чугун",
+          "сч20"
+        ],
+        "normalized": {
+          "material": "cast_iron"
+        },
+        "stability": "safe"
+      },
+      "ductile_iron": {
+        "aliases": [
+          "вчшг",
+          "ggg50",
+          "вч50"
+        ],
+        "normalized": {
+          "material": "ductile_iron"
+        },
+        "stability": "safe"
+      },
+      "brass": {
+        "aliases": [
+          "латунный",
+          "латунь",
+          "никелированный"
+        ],
+        "normalized": {
+          "material": "brass"
+        },
+        "stability": "review",
+        "note": "Никелированный сам по себе может быть покрытием; безопаснее применять рядом с латунными family."
+      },
+      "galvanized": {
+        "aliases": [
+          "оцинкованный",
+          "цинк",
+          "цинк+ алюминий",
+          "цинк+алюминий"
+        ],
+        "normalized": {
+          "coating": "galvanized"
+        },
+        "stability": "safe"
+      },
+      "black_steel": {
+        "aliases": [
+          "черный",
+          "неоцинкованный"
+        ],
+        "normalized": {
+          "coating": "black"
+        },
+        "stability": "safe"
+      },
+      "polypropylene_pp_r": {
+        "aliases": [
+          "ppr",
+          "pp-r",
+          "полипропиленовый",
+          "полипропилен"
+        ],
+        "normalized": {
+          "material": "polypropylene_pp_r"
+        },
+        "stability": "safe"
+      },
+      "polyethylene_pe100": {
+        "aliases": [
+          "пэ100",
+          "pe100",
+          "пнд"
+        ],
+        "normalized": {
+          "material": "polyethylene_pe100"
+        },
+        "stability": "safe"
+      },
+      "epdm": {
+        "aliases": [
+          "epdm"
+        ],
+        "normalized": {
+          "seal_material": "epdm"
+        },
+        "stability": "safe"
+      }
+    },
+    "connection": {
+      "interflange": {
+        "aliases": [
+          "межфланцевый",
+          "межфл.",
+          "м/фл",
+          "межфл"
+        ],
+        "normalized": {
+          "connection": "interflange"
+        },
+        "stability": "safe"
+      },
+      "flanged": {
+        "aliases": [
+          "фланцевый",
+          "фланц."
+        ],
+        "normalized": {
+          "connection": "flanged"
+        },
+        "stability": "safe"
+      },
+      "threaded": {
+        "aliases": [
+          "муфтовый",
+          "резьба"
+        ],
+        "normalized": {
+          "connection": "threaded"
+        },
+        "stability": "review"
+      },
+      "grooved": {
+        "aliases": [
+          "грувлок",
+          "grooved",
+          "под муфту"
+        ],
+        "normalized": {
+          "connection": "grooved"
+        },
+        "stability": "safe"
+      },
+      "welded": {
+        "aliases": [
+          "сварка",
+          "сварной"
+        ],
+        "normalized": {
+          "connection": "welded"
+        },
+        "stability": "safe"
+      },
+      "butt_weld": {
+        "aliases": [
+          "приварной встык"
+        ],
+        "normalized": {
+          "connection": "butt_weld"
+        },
+        "stability": "safe"
+      },
+      "socket": {
+        "aliases": [
+          "раструбный",
+          "раструб"
+        ],
+        "normalized": {
+          "connection": "socket"
+        },
+        "stability": "safe"
+      },
+      "nipple": {
+        "aliases": [
+          "цапковый"
+        ],
+        "normalized": {
+          "connection": "nipple"
+        },
+        "stability": "safe"
+      },
+      "union_conn": {
+        "aliases": [
+          "штуцерный"
+        ],
+        "normalized": {
+          "connection": "union"
+        },
+        "stability": "safe"
+      }
+    },
+    "thread_form": {
+      "female_female": {
+        "aliases": [
+          "вр-вр",
+          "вн/вн",
+          "вн./вн.",
+          "вн.-вн.",
+          "г/г",
+          "внутренняя резьба/внутренняя резьба",
+          "ввр",
+          "ВВр",
+          "вн.р./вн.р.",
+          "внутренняя-внутренняя"
+        ],
+        "normalized": {
+          "thread_form": "female_female"
+        },
+        "stability": "safe"
+      },
+      "female_male": {
+        "aliases": [
+          "вр-нр",
+          "вн/нр",
+          "вр/нр",
+          "вн.-нар.",
+          "внутренняя резьба/наружная резьба",
+          "ВНр",
+          "НВр",
+          "вн./нар.",
+          "вн/нар",
+          "внутренняя-наружная"
+        ],
+        "normalized": {
+          "thread_form": "female_male"
+        },
+        "stability": "safe"
+      },
+      "male_male": {
+        "aliases": [
+          "нр-нр",
+          "нр/нр",
+          "наружная резьба/наружная резьба",
+          "ННр",
+          "нар./нар.",
+          "нар/нар",
+          "наружная-наружная"
+        ],
+        "normalized": {
+          "thread_form": "male_male"
+        },
+        "stability": "safe"
+      },
+      "union": {
+        "aliases": [
+          "американка",
+          "со сгоном",
+          "муфта-гайка"
+        ],
+        "normalized": {
+          "connection_feature": "union"
+        },
+        "stability": "safe"
+      }
+    },
+    "operator": {
+      "lever": {
+        "aliases": [
+          "рычаг",
+          "ручка-рычаг"
+        ],
+        "normalized": {
+          "handle_type": "lever"
+        },
+        "stability": "safe"
+      },
+      "butterfly": {
+        "aliases": [
+          "бабочка",
+          "рукоятка-бабочка",
+          "ручка-бабочка"
+        ],
+        "normalized": {
+          "handle_type": "butterfly"
+        },
+        "stability": "safe"
+      },
+      "handwheel": {
+        "aliases": [
+          "со штурвалом"
+        ],
+        "normalized": {
+          "operator": "handwheel"
+        },
+        "stability": "safe"
+      },
+      "gearbox": {
+        "aliases": [
+          "с редуктором"
+        ],
+        "normalized": {
+          "operator": "gearbox"
+        },
+        "stability": "safe"
+      },
+      "electric_actuator": {
+        "aliases": [
+          "с электроприводом",
+          "под электропривод",
+          "эл/пр"
+        ],
+        "normalized": {
+          "operator": "electric_actuator"
+        },
+        "stability": "safe"
+      }
+    },
+    "standard": {
+      "gost_33259": {
+        "aliases": [
+          "гост 33259",
+          "гост 33259-2015",
+          "гост33259-2015",
+          "гост33259"
+        ],
+        "normalized": {
+          "standard": "gost_33259"
+        },
+        "stability": "safe"
+      },
+      "gost_17378": {
+        "aliases": [
+          "гост 17378",
+          "гост 17378-2001",
+          "гост17378-01",
+          "гост 17378-01",
+          "гост17378",
+          "гост17378-2001"
+        ],
+        "normalized": {
+          "standard": "gost_17378"
+        },
+        "stability": "safe"
+      },
+      "gost_17375": {
+        "aliases": [
+          "гост 17375",
+          "гост 17375-2001",
+          "гост17375-01",
+          "гост 17375-01",
+          "гост17375",
+          "гост17375-2001"
+        ],
+        "normalized": {
+          "standard": "gost_17375"
+        },
+        "stability": "safe"
+      },
+      "gost_17376": {
+        "aliases": [
+          "гост 17376",
+          "гост 17376-2001",
+          "гост17376-01",
+          "гост 17376-01",
+          "гост17376",
+          "гост17376-2001"
+        ],
+        "normalized": {
+          "standard": "gost_17376"
+        },
+        "stability": "safe"
+      },
+      "gost_3262": {
+        "aliases": [
+          "гост 3262-75",
+          "гост 3262",
+          "гост3262-75",
+          "гост3262"
+        ],
+        "normalized": {
+          "standard": "gost_3262"
+        },
+        "stability": "safe"
+      },
+      "gost_8957": {
+        "aliases": [
+          "гост 8957-75",
+          "гост 8957"
+        ],
+        "normalized": {
+          "standard": "gost_8957"
+        },
+        "stability": "safe"
+      },
+      "gost_r_59553": {
+        "aliases": [
+          "гост р 59553-2021",
+          "гост р 59553",
+          "гостр59553"
+        ],
+        "normalized": {
+          "standard": "gost_r_59553"
+        },
+        "stability": "safe"
+      },
+      "din_en_877": {
+        "aliases": [
+          "din en 877",
+          "en 877",
+          "dinen877"
+        ],
+        "normalized": {
+          "standard": "din_en_877"
+        },
+        "stability": "safe"
+      },
+      "gost_10704": {
+        "aliases": [
+          "гост 10704-91",
+          "гост10704-91",
+          "гост 10704",
+          "гост10704"
+        ],
+        "normalized": {
+          "standard": "gost_10704"
+        },
+        "stability": "safe"
+      },
+      "gost_10705": {
+        "aliases": [
+          "гост 10705-80",
+          "гост 10705",
+          "гост10705"
+        ],
+        "normalized": {
+          "standard": "gost_10705"
+        },
+        "stability": "safe"
+      },
+      "gost_8732": {
+        "aliases": [
+          "гост 8732",
+          "гост8732"
+        ],
+        "normalized": {
+          "standard": "gost_8732"
+        },
+        "stability": "safe"
+      },
+      "gost_8734": {
+        "aliases": [
+          "гост 8734",
+          "гост8734"
+        ],
+        "normalized": {
+          "standard": "gost_8734"
+        },
+        "stability": "safe"
+      },
+      "gost_8639": {
+        "aliases": [
+          "гост 8639",
+          "гост8639"
+        ],
+        "normalized": {
+          "standard": "gost_8639"
+        },
+        "stability": "safe"
+      },
+      "gost_8645": {
+        "aliases": [
+          "гост 8645",
+          "гост8645"
+        ],
+        "normalized": {
+          "standard": "gost_8645"
+        },
+        "stability": "safe"
+      },
+      "gost_52379": {
+        "aliases": [
+          "гост 52379",
+          "гост52379"
+        ],
+        "normalized": {
+          "standard": "gost_52379"
+        },
+        "stability": "safe"
+      },
+      "gost_32415": {
+        "aliases": [
+          "гост 32415-2013",
+          "гост 32415",
+          "гост32415"
+        ],
+        "normalized": {
+          "standard": "gost_32415"
+        },
+        "stability": "safe"
+      },
+      "atk_24_200_02_90": {
+        "aliases": [
+          "атк 24.200.02.90",
+          "атк24.200.02.90"
+        ],
+        "normalized": {
+          "standard": "atk_24_200_02_90"
+        },
+        "stability": "safe"
+      }
+    },
+    "diameter_notation": {
+      "dn": {
+        "aliases": [
+          "ду",
+          "dn"
+        ],
+        "normalized": {
+          "diameter_kind": "dn"
+        },
+        "stability": "safe"
+      },
+      "outer_diameter": {
+        "aliases": [
+          "d",
+          "dн",
+          "ø",
+          "∅"
+        ],
+        "normalized": {
+          "diameter_kind": "outer_diameter"
+        },
+        "stability": "review",
+        "note": "Не превращать в DN без family context. Для труб и PPR это часто внешний диаметр."
+      }
+    },
+    "pressure_notation": {
+      "pn": {
+        "aliases": [
+          "pn"
+        ],
+        "normalized": {
+          "pressure_kind": "pn"
+        },
+        "stability": "safe"
+      },
+      "ru": {
+        "aliases": [
+          "ру",
+          "pу"
+        ],
+        "normalized": {
+          "pressure_kind": "ru"
+        },
+        "stability": "safe"
+      }
+    },
+    "brand_model": {
+      "dendor": {
+        "aliases": [
+          "dendor"
+        ],
+        "normalized": {
+          "brand": "dendor"
+        },
+        "stability": "safe"
+      },
+      "gross": {
+        "aliases": [
+          "gross"
+        ],
+        "normalized": {
+          "brand": "gross"
+        },
+        "stability": "safe"
+      },
+      "ld_pride": {
+        "aliases": [
+          "ld pride"
+        ],
+        "normalized": {
+          "brand": "ld_pride"
+        },
+        "stability": "safe"
+      },
+      "valfex": {
+        "aliases": [
+          "valfex",
+          "валфекс"
+        ],
+        "normalized": {
+          "brand": "valfex"
+        },
+        "stability": "safe"
+      },
+      "pro_aqua": {
+        "aliases": [
+          "pro aqua",
+          "proaqua"
+        ],
+        "normalized": {
+          "brand": "pro_aqua"
+        },
+        "stability": "safe"
+      },
+      "kalde": {
+        "aliases": [
+          "kalde"
+        ],
+        "normalized": {
+          "brand": "kalde"
+        },
+        "stability": "safe"
+      },
+      "benarmo": {
+        "aliases": [
+          "benarmo"
+        ],
+        "normalized": {
+          "brand": "benarmo"
+        },
+        "stability": "safe"
+      },
+      "itap": {
+        "aliases": [
+          "itap"
+        ],
+        "normalized": {
+          "brand": "itap"
+        },
+        "stability": "safe"
+      },
+      "vt_base": {
+        "aliases": [
+          "vt base",
+          "vt."
+        ],
+        "normalized": {
+          "brand": "valtec"
+        },
+        "stability": "review",
+        "note": "Префикс VT. часто встречается в артикулах Valtec, но не вся строка VT автоматически означает одинаковое изделие."
+      }
+    },
+    "series_model": {
+      "se_110_04": {
+        "aliases": [
+          "se.110.04",
+          "se11004"
+        ],
+        "normalized": {
+          "series": "se_110_04"
+        },
+        "stability": "safe"
+      },
+      "mp50m2": {
+        "aliases": [
+          "мп50м2",
+          "mp50m2"
+        ],
+        "normalized": {
+          "series": "mp50m2"
+        },
+        "stability": "safe"
+      },
+      "vt_161_n_04": {
+        "aliases": [
+          "vt.161.n.04",
+          "vt161n04"
+        ],
+        "normalized": {
+          "series": "vt_161_n_04"
+        },
+        "stability": "safe"
+      }
+    },
+    "seal_material": {
+      "epdm": {
+        "aliases": [
+          "epdm",
+          "EPDM",
+          "этилен-пропилен"
+        ],
+        "normalized": {
+          "seal_material": "epdm"
+        },
+        "stability": "safe"
+      },
+      "nbr": {
+        "aliases": [
+          "nbr",
+          "NBR",
+          "нитрил"
+        ],
+        "normalized": {
+          "seal_material": "nbr"
+        },
+        "stability": "safe"
+      },
+      "ptfe": {
+        "aliases": [
+          "ptfe",
+          "PTFE",
+          "тефлон",
+          "фторопласт"
+        ],
+        "normalized": {
+          "seal_material": "ptfe"
+        },
+        "stability": "safe"
+      },
+      "viton": {
+        "aliases": [
+          "viton",
+          "Viton",
+          "фторкаучук"
+        ],
+        "normalized": {
+          "seal_material": "viton"
+        },
+        "stability": "safe"
+      }
+    },
+    "pipe_specification": {
+      "sdr6": {
+        "aliases": [
+          "sdr6",
+          "sdr 6"
+        ],
+        "normalized": {
+          "sdr": "SDR6"
+        },
+        "stability": "safe"
+      },
+      "sdr7_4": {
+        "aliases": [
+          "sdr7.4",
+          "sdr 7.4"
+        ],
+        "normalized": {
+          "sdr": "SDR7.4"
+        },
+        "stability": "safe"
+      },
+      "sdr11": {
+        "aliases": [
+          "sdr11",
+          "sdr 11"
+        ],
+        "normalized": {
+          "sdr": "SDR11"
+        },
+        "stability": "safe"
+      },
+      "sdr17": {
+        "aliases": [
+          "sdr17",
+          "sdr 17"
+        ],
+        "normalized": {
+          "sdr": "SDR17"
+        },
+        "stability": "safe"
+      },
+      "sdr17_6": {
+        "aliases": [
+          "sdr17.6",
+          "sdr 17.6"
+        ],
+        "normalized": {
+          "sdr": "SDR17.6"
+        },
+        "stability": "safe"
+      },
+      "sdr21": {
+        "aliases": [
+          "sdr21",
+          "sdr 21"
+        ],
+        "normalized": {
+          "sdr": "SDR21"
+        },
+        "stability": "safe"
+      },
+      "sdr26": {
+        "aliases": [
+          "sdr26",
+          "sdr 26"
+        ],
+        "normalized": {
+          "sdr": "SDR26"
+        },
+        "stability": "safe"
+      },
+      "seamless": {
+        "aliases": [
+          "бесшовный",
+          "бесшовная"
+        ],
+        "normalized": {
+          "pipe_spec": "seamless"
+        },
+        "stability": "safe"
+      },
+      "welded_seam": {
+        "aliases": [
+          "шовная",
+          "шовный"
+        ],
+        "normalized": {
+          "pipe_spec": "welded_seam"
+        },
+        "stability": "safe"
+      },
+      "profile": {
+        "aliases": [
+          "профильная",
+          "профильный"
+        ],
+        "normalized": {
+          "pipe_spec": "profile"
+        },
+        "stability": "safe"
+      },
+      "corrugated": {
+        "aliases": [
+          "гофрированная",
+          "гофрированный"
+        ],
+        "normalized": {
+          "pipe_spec": "corrugated"
+        },
+        "stability": "safe"
+      }
+    },
+    "actuator_type": {
+      "electric": {
+        "aliases": [
+          "электропривод"
+        ],
+        "normalized": {
+          "actuator": "electric"
+        },
+        "stability": "safe"
+      },
+      "pneumatic": {
+        "aliases": [
+          "пневмопривод"
+        ],
+        "normalized": {
+          "actuator": "pneumatic"
+        },
+        "stability": "safe"
+      },
+      "gearbox": {
+        "aliases": [
+          "редуктор"
+        ],
+        "normalized": {
+          "actuator": "gearbox"
+        },
+        "stability": "safe",
+        "note": "Как атрибут а не family; family gearbox обрабатывается через family_triggers."
+      },
+      "handwheel": {
+        "aliases": [
+          "штурвал"
+        ],
+        "normalized": {
+          "actuator": "handwheel"
+        },
+        "stability": "safe"
+      },
+      "lever": {
+        "aliases": [
+          "рычаг"
+        ],
+        "normalized": {
+          "actuator": "lever"
+        },
+        "stability": "safe"
+      },
+      "butterfly_handle": {
+        "aliases": [
+          "бабочка"
+        ],
+        "normalized": {
+          "actuator": "butterfly"
+        },
+        "stability": "safe"
+      },
+      "flywheel": {
+        "aliases": [
+          "маховик"
+        ],
+        "normalized": {
+          "actuator": "flywheel"
+        },
+        "stability": "safe"
+      }
+    },
+    "dimension_prefix": {
+      "dn": {
+        "aliases": [
+          "ду",
+          "Ду",
+          "Ду.",
+          "ду.",
+          "d",
+          "D",
+          "dn",
+          "DN"
+        ],
+        "normalized": {
+          "dimension_prefix": "DN"
+        },
+        "stability": "safe"
+      },
+      "pn": {
+        "aliases": [
+          "ру",
+          "Ру",
+          "Ру.",
+          "ру.",
+          "pn",
+          "PN"
+        ],
+        "normalized": {
+          "dimension_prefix": "PN"
+        },
+        "stability": "safe"
+      }
+    }
+  },
+  "noise_patterns": {
+    "regex_rules": [
+      {
+        "pattern": "^\\s*наименование\\s*$",
+        "action": "drop_row"
+      },
+      {
+        "pattern": "^\\s*ввод\\s+[а-яa-z0-9,\\s.-]+$",
+        "action": "drop_row"
+      },
+      {
+        "pattern": "^\\s*узел учета\\b",
+        "action": "drop_row"
+      },
+      {
+        "pattern": "^\\s*сантехнические приборы и оборудование\\s*$",
+        "action": "drop_row"
+      },
+      {
+        "pattern": "^\\s*в\\d+\\s*$",
+        "action": "drop_row"
+      },
+      {
+        "pattern": "\\s+шт\\.?\\s+\\d+(?:[.,]\\d+)?\\s*$",
+        "action": "strip_tail"
+      },
+      {
+        "pattern": "\\s+пом\\.\\s*[-\\dа-яa-z]+\\s*$",
+        "action": "strip_tail"
+      },
+      {
+        "pattern": "\\s+россия\\s*$",
+        "action": "strip_tail"
+      },
+      {
+        "pattern": "^\\s*\\(?рф\\)?\\s*",
+        "action": "strip_head"
+      },
+      {
+        "pattern": "\\s{2,}",
+        "action": "collapse_spaces"
+      }
+    ],
+    "safe_to_remove": [
+      "россия",
+      "Россия",
+      "РФ",
+      "импорт",
+      "импортный",
+      "поднадзорный",
+      "Поднадзорный",
+      "в наличии",
+      "под заказ",
+      "срочно",
+      "аналог допускается",
+      "аналог возможен",
+      "ориентир",
+      "ориентировочно",
+      "или аналог",
+      "или эквивалент",
+      "по чертежу",
+      "по эскизу",
+      "бюджетный вариант",
+      "не менее",
+      "не более",
+      "минимум",
+      "максимум",
+      "новый",
+      "б/у",
+      "(м)",
+      "(шт)",
+      "(шт.)",
+      "(пог.м)",
+      "пог.м",
+      "погонный метр"
+    ],
+    "caution_patterns": {
+      "_comment": "Удалять только если контекст подтверждает ненужность",
+      "patterns": [
+        {
+          "pattern": "\\d{4}\\s*г\\.?\\)?$",
+          "meaning": "год выпуска в скобках — обычно не важен для матчинга"
+        },
+        {
+          "pattern": "доставка\\s+до\\s+.*$",
+          "meaning": "условия доставки"
+        },
+        {
+          "pattern": "монтаж\\s+.*$",
+          "meaning": "условия монтажа"
+        }
+      ]
+    }
+  },
+  "family_specific_hints": {
+    "flange": {
+      "required_for_exact": [
+        "family",
+        "dn",
+        "pn",
+        "flange_type"
+      ],
+      "strong_optional_fields": [
+        "face",
+        "row",
+        "material",
+        "standard"
+      ],
+      "notes": [
+        "Словесные формулировки клиента нужно переводить в кодовую форму DN-PN-type-row-face-material.",
+        "Фраза 'комплект фланцев' не меняет family, а описывает комплектность."
+      ],
+      "coded_format": {
+        "_comment": "Остатки кодируют фланцы как DN-PN-Type-Series-Face-Steel. Парсер должен распознавать обе формы.",
+        "stock_pattern": "{DN}-{PN}-{type}-{series}-{face}-{steel} ГОСТ33259",
+        "client_pattern": "тип {type} DN{DN} PN{PN}",
+        "example_mapping": {
+          "client": "Фланец стальной плоский приварной тип 01 DN80 PN16",
+          "stock": "Фланец плоский 80-16-01-1-В-Ст.20 ГОСТ 33259"
+        },
+        "face_codes": {
+          "В": "уплотнительная поверхность тип В (выступ)",
+          "B": "то же самое латинской B — трактовать как В",
+          "F": "уплотнительная поверхность тип F (шип-паз)",
+          "E": "уплотнительная поверхность тип E (выступ-впадина)",
+          "D": "уплотнительная поверхность тип D (под линзу)",
+          "M": "под металлическую прокладку",
+          "L": "под линзовую прокладку"
+        }
+      },
+      "type_aliases": {
+        "плоский": "01",
+        "плоский приварной": "01",
+        "воротниковый": "11",
+        "приварной встык": "11",
+        "свободный": "02",
+        "глухой": "заглушка"
+      }
+    },
+    "perehod": {
+      "required_for_exact": [
+        "family",
+        "d1",
+        "d2"
+      ],
+      "strong_optional_fields": [
+        "shape",
+        "material",
+        "standard",
+        "execution"
+      ],
+      "notes": [
+        "Для стальных переходов ГОСТ 17378 и shape concentric/eccentric важны.",
+        "Для PPR клиентский 'переход' часто нужно нормализовать в складскую 'муфта переходная'."
+      ]
+    },
+    "tee": {
+      "required_for_exact": [
+        "family",
+        "d1",
+        "d2",
+        "d3"
+      ],
+      "strong_optional_fields": [
+        "material",
+        "connection",
+        "standard"
+      ],
+      "notes": [
+        "Тройники нельзя сводить к паре размеров.",
+        "Переходной и равнопроходной тройник должны расходиться по subtype."
+      ],
+      "size_notation": {
+        "_comment": "Тройники имеют 3 размера (run×run×branch). Равнопроходной = все 3 одинаковые.",
+        "equal_indicators": [
+          "равнопроходной",
+          "равнопроходный",
+          "equal"
+        ],
+        "reducing_indicators": [
+          "переходной",
+          "переходный",
+          "reducing"
+        ],
+        "stock_pattern_example": "Тройник 2- 76х3,5-57х3,5 ГОСТ17376",
+        "client_pattern_example": "Тройник переходной Ду50х32"
+      }
+    },
+    "elbow": {
+      "required_for_exact": [
+        "family",
+        "angle"
+      ],
+      "strong_optional_fields": [
+        "diameter",
+        "connection",
+        "material",
+        "standard"
+      ],
+      "notes": [
+        "Угол 45/90/180 должен быть hard blocker.",
+        "Колено грувлок и стальной отвод не должны матчиться как одно и то же."
+      ],
+      "coded_format": {
+        "_comment": "Остатки кодируют отводы как Angle-Series-ODxWall Steel ГОСТ. Клиент может указывать по DN.",
+        "stock_pattern": "Отвод {angle}-{series}- {OD}х{wall} Ст.{steel} ГОСТ17375",
+        "client_pattern": "Отвод {angle}° стальной Ду{DN}",
+        "series_meaning": {
+          "1": "короткий радиус изгиба (R=DN)",
+          "2": "длинный радиус изгиба (R=1.5DN)"
+        }
+      },
+      "dn_to_od_fitting": {
+        "_comment": "Маппинг DN → OD для стальных отводов по ГОСТ 17375 (отличается от ВГП труб!)",
+        "15": 21.3,
+        "20": 26.9,
+        "25": 33.7,
+        "32": 42.4,
+        "40": 48.3,
+        "50": 60.3,
+        "65": 76.1,
+        "80": 88.9,
+        "100": 114.3,
+        "125": 139.7,
+        "150": 168.3,
+        "200": 219.1,
+        "250": 273.0,
+        "300": 323.9,
+        "350": 355.6,
+        "400": 406.4
+      }
+    },
+    "zatvor": {
+      "required_for_exact": [
+        "family",
+        "dn"
+      ],
+      "strong_optional_fields": [
+        "pn",
+        "connection",
+        "body_material",
+        "disc_material",
+        "seal_material",
+        "operator"
+      ],
+      "notes": [
+        "Если строка начинается с 'затвор', то 'редуктор/рукоятка/электропривод' — это исполнение.",
+        "Standalone gearbox должен быть отдельным candidate family."
+      ],
+      "critical_rule": {
+        "_comment": "КРИТИЧЕСКИ ВАЖНО: 'затвор ... с редуктором' = затвор с типом привода, family=zatvor, actuator=gearbox. НЕ family=gearbox.",
+        "pattern": "затвор.*редуктор",
+        "result": {
+          "family": "zatvor",
+          "actuator": "gearbox"
+        },
+        "wrong_result": {
+          "family": "gearbox"
+        },
+        "examples": [
+          {
+            "input": "Затвор дисковый DN200 PN16 с редуктором",
+            "family": "zatvor",
+            "actuator": "gearbox"
+          },
+          {
+            "input": "Затвор EPDM Ду250 Ру10/16 фл., редуктор Benarmo",
+            "family": "zatvor",
+            "actuator": "gearbox"
+          },
+          {
+            "input": "Редуктор F07 для затвора DN80",
+            "family": "gearbox",
+            "for_family": "zatvor"
+          }
+        ]
+      }
+    },
+    "gearbox": {
+      "required_for_exact": [
+        "family"
+      ],
+      "strong_optional_fields": [
+        "mounting_pad",
+        "stem_square",
+        "compatible_dn_range",
+        "turn_type",
+        "for_family"
+      ],
+      "notes": [
+        "Редукторы нельзя автоматически считать аналогом затвора с редуктором.",
+        "F07/F10 и квадрат штока являются первичными признаками."
+      ]
+    },
+    "kran": {
+      "required_for_exact": [
+        "family"
+      ],
+      "strong_optional_fields": [
+        "subfamily",
+        "thread_form",
+        "diameter",
+        "handle_type",
+        "service_for",
+        "standard"
+      ],
+      "notes": [
+        "ВР-ВР / ВР-НР / американка / для манометра — это не косметика, а функциональные признаки.",
+        "Тип ручки допустимо держать как soft/routing field для generic запросов."
+      ],
+      "valve_codes": {
+        "_comment": "Технические обозначения арматуры по ОСТ — встречаются в остатках, клиент обычно пишет описательно",
+        "11б27п1": {
+          "family": "kran",
+          "material": "латунь",
+          "type": "шаровой"
+        },
+        "11б27п": {
+          "family": "kran",
+          "material": "латунь",
+          "type": "шаровой"
+        },
+        "11с33п": {
+          "family": "kran",
+          "material": "сталь",
+          "type": "шаровой"
+        },
+        "11с67п": {
+          "family": "kran",
+          "material": "сталь",
+          "type": "шаровой фланцевый"
+        },
+        "15нж22нж": {
+          "family": "klapan",
+          "material": "нерж.",
+          "type": "обратный подъемный"
+        },
+        "16нж10нж": {
+          "family": "klapan",
+          "material": "нерж.",
+          "type": "обратный поворотный"
+        },
+        "30ч6бр": {
+          "family": "zadvizhka",
+          "material": "чугун",
+          "type": "клиновая"
+        },
+        "30ч39р": {
+          "family": "zadvizhka",
+          "material": "чугун",
+          "type": "клиновая обрезиненная"
+        },
+        "30ч539р": {
+          "family": "zadvizhka",
+          "material": "чугун",
+          "type": "обрезиненный клин"
+        },
+        "10с10п": {
+          "family": "klapan",
+          "material": "сталь",
+          "type": "запорный"
+        }
+      }
+    },
+    "filter": {
+      "required_for_exact": [
+        "family"
+      ],
+      "strong_optional_fields": [
+        "subfamily",
+        "insert",
+        "connection",
+        "dn",
+        "pn"
+      ],
+      "notes": [
+        "Косой, сетчатый, магнитный и угловой меняют подсемейство.",
+        "Магнитная вставка должна попадать в field, а не оставаться текстовым шумом."
+      ]
+    },
+    "patrubok": {
+      "required_for_exact": [
+        "family"
+      ],
+      "strong_optional_fields": [
+        "subfamily",
+        "meter_side",
+        "dn",
+        "length",
+        "connection",
+        "material"
+      ],
+      "notes": [
+        "PDS/PPS/PFG лучше хранить как нормализованные подсемейства.",
+        "L= значения нельзя терять при очистке строки."
+      ]
+    },
+    "schetchik": {
+      "required_for_exact": [
+        "family"
+      ],
+      "strong_optional_fields": [
+        "meter_type",
+        "dn",
+        "output_type",
+        "communication"
+      ],
+      "notes": [
+        "RS-485 и импульсный выход должны жить в отдельных полях.",
+        "Турбинный, крыльчатый и комбинированный нельзя смешивать."
+      ]
+    },
+    "manometer": {
+      "required_for_exact": [
+        "family"
+      ],
+      "strong_optional_fields": [
+        "pressure_range",
+        "dial_size",
+        "thread_size",
+        "connection_side"
+      ],
+      "notes": [
+        "Диапазон 0..1,6 МПа — ключевой признак, а не свободный текст.",
+        "МП50М2 полезно хранить как model/series, но не подменять любой манометр в МП50М2."
+      ]
+    },
+    "vozduhootvod": {
+      "required_for_exact": [
+        "family"
+      ],
+      "strong_optional_fields": [
+        "subfamily",
+        "dn",
+        "orientation",
+        "series"
+      ],
+      "notes": [
+        "Автоматический воздухоотводчик и вантуз лучше разводить по subtype.",
+        "Модель SE.110.04 полезна как series, но не всегда есть в остатке."
+      ]
+    },
+    "pipe": {
+      "dn_od_mapping_vgp": {
+        "_comment": "ВГП трубы: DN (условный проход) ↔ OD (наружный диаметр). Таблица из ГОСТ 3262.",
+        "10": {
+          "od": 17.0,
+          "wall_light": 2.0,
+          "wall_standard": 2.2,
+          "wall_heavy": 2.8
+        },
+        "15": {
+          "od": 21.3,
+          "wall_light": 2.35,
+          "wall_standard": 2.8,
+          "wall_heavy": 3.2
+        },
+        "20": {
+          "od": 26.8,
+          "wall_light": 2.35,
+          "wall_standard": 2.8,
+          "wall_heavy": 3.2
+        },
+        "25": {
+          "od": 33.5,
+          "wall_light": 2.8,
+          "wall_standard": 3.2,
+          "wall_heavy": 4.0
+        },
+        "32": {
+          "od": 42.3,
+          "wall_light": 2.8,
+          "wall_standard": 3.2,
+          "wall_heavy": 4.0
+        },
+        "40": {
+          "od": 48.0,
+          "wall_light": 3.0,
+          "wall_standard": 3.5,
+          "wall_heavy": 4.0
+        },
+        "50": {
+          "od": 60.0,
+          "wall_light": 3.0,
+          "wall_standard": 3.5,
+          "wall_heavy": 4.5
+        },
+        "65": {
+          "od": 75.5,
+          "wall_light": 3.2,
+          "wall_standard": 4.0,
+          "wall_heavy": 4.5
+        },
+        "80": {
+          "od": 88.5,
+          "wall_light": 3.5,
+          "wall_standard": 4.0,
+          "wall_heavy": 4.5
+        },
+        "100": {
+          "od": 114.0,
+          "wall_light": 4.0,
+          "wall_standard": 4.5,
+          "wall_heavy": 5.0
+        },
+        "125": {
+          "od": 140.0,
+          "wall_light": 4.0,
+          "wall_standard": 4.5,
+          "wall_heavy": 5.5
+        },
+        "150": {
+          "od": 165.0,
+          "wall_light": 4.0,
+          "wall_standard": 4.5,
+          "wall_heavy": 5.5
+        }
+      },
+      "material_indicators": {
+        "вгп": "сталь, ГОСТ3262",
+        "э/с": "сталь, ГОСТ10704",
+        "бесшов.": "сталь, ГОСТ8732 или ГОСТ8734",
+        "проф.": "сталь, ГОСТ8639 или ГОСТ8645",
+        "PPR": "полипропилен, ГОСТ32415",
+        "ПЭ": "полиэтилен",
+        "PEX": "сшитый полиэтилен",
+        "ВЧШГ": "высокопрочный чугун"
+      }
+    }
+  },
+  "stock_derived_aliases": {
+    "brand_prefixes": {
+      "safety": "safe",
+      "aliases": {
+        "(РВЗ)": "РВЗ",
+        "(ЗАО)": "",
+        "ГРАНВЭЛ": "Гранвэл",
+        "LD": "LD",
+        "Benarmo": "Benarmo",
+        "GROSS": "GROSS",
+        "SKS": "SKS",
+        "Луидор": "Луидор",
+        "Ridan": "Ridan"
+      }
+    },
+    "stock_abbreviations": {
+      "safety": "safe",
+      "aliases": {
+        "м/фл": "межфланцевый",
+        "обр.": "обратный",
+        "шар.": "шаровой",
+        "диск.": "дисковый",
+        "сетч.": "сетчатый",
+        "фл.": "фланцевый",
+        "муфт.": "муфтовый",
+        "фильтр.": "фильтрующий",
+        "невыдв.шток": "невыдвижной шток",
+        "2/ст": "двусторонний",
+        "кл А": "класс А",
+        "кл Б": "класс Б",
+        "сл проб": "сливная пробка",
+        "Y-обр": "Y-образный",
+        "ФМФ": "фильтр магнитный фланцевый",
+        "ФСФч": "фильтр сетчатый фланцевый чугунный",
+        "ЗПВС": "затвор поворотный высокопроизводительный стальной",
+        "FL(w)": "межфланцевый (вафельный)",
+        "MN": "ручной привод",
+        "MN-Е": "ручной привод с электровозможностью",
+        "ЭК": "экономичный"
+      }
+    },
+    "stock_dimension_patterns": {
+      "_comment": "Паттерны размеров в остатках, которые парсер должен распознавать",
+      "flange_coded": "(?P<dn>\\d+)-(?P<pn>\\d+)-(?P<type>\\d+)-(?P<series>\\d)-(?P<face>[А-ЯA-Z])-(?:Ст\\.)?(?P<steel>[\\w.]+)",
+      "elbow_coded": "(?P<angle>\\d+)-(?P<series>\\d)-\\s*(?P<od>[\\d.]+)[хx](?P<wall>[\\d.,]+)",
+      "tee_coded": "(?P<series>\\d)-\\s*(?P<od1>[\\d.]+)[хx](?P<wall1>[\\d.,]+)-(?P<od2>[\\d.]+)[хx](?P<wall2>[\\d.,]+)",
+      "transition_coded": "(?P<shape>[КЭ])-(?P<series>\\d)-\\s*(?P<od1>[\\d.]+)[хx](?P<wall1>[\\d.,]+)\\s*-\\s*(?P<od2>[\\d.]+)[хx](?P<wall2>[\\d.,]+)",
+      "pipe_profile": "Проф\\.\\s*(?:Уг|Кв|Прям)\\s*(?P<a>\\d+)[хx](?P<b>\\d+)[хx](?P<wall>[\\d.,]+)[хx](?P<len>\\d+)"
+    },
+    "product_mappings": {
+      "female_female_ball_valve": {
+        "client_forms": [
+          "Кран шаровой латунный внутренняя резьба/внутренняя резьба 1/2''",
+          "Кран шаровой латунный внутренняя резьба/внутренняя резьба 3/4''"
+        ],
+        "stock_forms": [
+          "Кран шаровой латунный 11Б27п1-15 г/г (вн./вн.резьба), ручка \"рычаг\"",
+          "Кран 1/2\" вн.-вн. шаровый бабочка VT Base VT.217"
+        ],
+        "normalized": {
+          "family": "kran",
+          "subfamily": "ball_valve",
+          "material": "brass",
+          "thread_form": "female_female"
+        },
+        "stability": "safe"
+      },
+      "manometer_service_ball_valve": {
+        "client_forms": [
+          "Кран шаровой для манометра муфта-гайка, рукоятка-бабочка, ВР-ВР 1/2x1/4, PN40"
+        ],
+        "stock_forms": [
+          "Кран шаровой латунный для манометра LD Pride 44.15.В-В.2М.Б Ду15 Ру16 бабочка"
+        ],
+        "normalized": {
+          "family": "kran",
+          "service_for": "manometer",
+          "thread_form": "female_female",
+          "handle_type": "butterfly"
+        },
+        "stability": "safe"
+      },
+      "ppr_reducer_coupling": {
+        "client_forms": [
+          "Переход полипропиленовый PPR, D32х25",
+          "Переход полипропиленовый PPR, D50х40"
+        ],
+        "stock_forms": [
+          "Муфта переходная PP-R DN 32-25 Белая PRO AQUA",
+          "Муфта переходная 50х40 PPR KALDE"
+        ],
+        "normalized": {
+          "family": "perehod",
+          "subfamily": "coupling",
+          "material": "polypropylene_pp_r"
+        },
+        "stability": "safe"
+      },
+      "flange_type_01_word_to_code": {
+        "client_forms": [
+          "Фланец стальной плоский приварной тип 01 DN20 PN16",
+          "Фланец стальной плоский приварной тип 01 DN32 PN16"
+        ],
+        "stock_forms": [
+          "Фланец плоский 20-16-01-1-B-Ст.20-IV ГОСТ 33259 ЭК",
+          "Фланец плоский 32-16-01-1-B-Ст.20 ГОСТ 33259 LD"
+        ],
+        "normalized": {
+          "family": "flange",
+          "subtype": "flat_welded",
+          "flange_type": "01"
+        },
+        "stability": "safe"
+      },
+      "flange_type_11_word_to_code": {
+        "client_forms": [
+          "Фланец стальной приварной встык тип 11 DN50 PN16",
+          "Комплект фланцев ... DN80 PN16 тип 11 ГОСТ 33259-2015"
+        ],
+        "stock_forms": [
+          "Фланец воротниковый 50-16-11-1-В-Ст.20-IV ГОСТ 33259 ЭК",
+          "Фланец воротниковый 80-16-11-1-B-Ст.20-IV ГОСТ 33259 Россия"
+        ],
+        "normalized": {
+          "family": "flange",
+          "subtype": "weld_neck",
+          "flange_type": "11"
+        },
+        "stability": "safe"
+      },
+      "interflange_butterfly_valve": {
+        "client_forms": [
+          "Затвор дисковый межфланцевый GROSS, DN80 PN16, корпус-чугун, диск-чугун, EPDM, с электроприводом"
+        ],
+        "stock_forms": [
+          "Затвор поворот.межфл.чуг./чуг. EPDM Ду80 Ру16 с эл/пр ...",
+          "Затвор FAF 3550 Ду80 Ру16 межфл., корпус-чугун, диск-чугун GGG50, упл.-EPDM рукоятка"
+        ],
+        "normalized": {
+          "family": "zatvor",
+          "connection": "interflange",
+          "body_material": "cast_iron",
+          "disc_material": "cast_iron",
+          "seal_material": "epdm"
+        },
+        "stability": "review",
+        "note": "Бренд и тип оператора могут расходиться, поэтому exact возможен только при совпадении исполнения."
+      },
+      "automatic_air_vent_generic_to_stock_form": {
+        "client_forms": [
+          "Воздухоотводчик автоматический DN15 SE.110.04",
+          "Автоматический воздухоотводчик ∅15 PN10 SE.110.04"
+        ],
+        "stock_forms": [
+          "Воздухоотводчик латунный автоматический Ду.15 (1/2\") нар/р прямой",
+          "Воздухоотводчик латунный автоматический Ду.15 (1/2\") нар/р угловой"
+        ],
+        "normalized": {
+          "family": "vozduhootvod",
+          "subfamily": "automatic",
+          "dn": 15,
+          "series": "se_110_04"
+        },
+        "stability": "review",
+        "note": "Серия присутствует в запросе, но в остатке чаще нет; orientation и прямой/угловой нужно проверять отдельно."
+      },
+      "meter_spool_pds_pps": {
+        "client_forms": [
+          "Патрубок до счетчика фланцевый, Ду65",
+          "Патрубок после счетчика фланцевый, Ду65"
+        ],
+        "stock_forms": [
+          "Патрубок до счетчика ПДС Ду.40",
+          "Патрубок после счетчика ППС Ду.50",
+          "Патрубки комплект ПДС + ППС Ду.65"
+        ],
+        "normalized": {
+          "family": "patrubok",
+          "subfamily": "meter_spool"
+        },
+        "stability": "safe"
+      },
+      "generic_wedge_gate_to_model_lines": {
+        "client_forms": [
+          "Задвижка с обрезиненным клином со штурвалом, короткая, PN16, DN50"
+        ],
+        "stock_forms": [
+          "Задвижка DENDOR тип 47GV DN 50 PN10/PN16",
+          "Задвижка 30ч39р Ду50 Ру16 ..."
+        ],
+        "normalized": {
+          "family": "zadvizhka",
+          "wedge_type": "rubberized",
+          "operator": "handwheel"
+        },
+        "stability": "review",
+        "note": "Это полезный routing alias, но не synonym exact match: нужна проверка длины/короткая, модели и производителя."
+      }
+    }
+  },
+  "canonical_examples": [
+    {
+      "client": "Труба стальная водогазопроводная Ø26.8х2.8 ГОСТ 3262-75",
+      "stock": "Труба ВГП 3262 оц Ду20х2,8 (26,8) ГОСТ3262-75",
+      "match_type": "exact",
+      "key_normalizations": [
+        "Ø26.8→DN20 (VGP table)",
+        "водогазопроводная→ВГП",
+        "ГОСТ 3262-75→ГОСТ3262"
+      ]
+    },
+    {
+      "client": "Отвод 90° стальной крутоизогнутый бесшовный, Ду15, исп. 1 ГОСТ 17375-2001",
+      "stock": "Отвод 90-1- 15 (21,3х2,8) Ст.20 ГОСТ 17375",
+      "match_type": "exact",
+      "key_normalizations": [
+        "Ду15→OD 21.3 (fitting table)",
+        "исп. 1→серия 1",
+        "крутоизогнутый→implicit"
+      ]
+    },
+    {
+      "client": "Фланец стальной плоский приварной тип 01 DN80 PN16",
+      "stock": "Фланец плоский 80-16-01-1-В-Ст.20 ГОСТ 33259",
+      "match_type": "exact",
+      "key_normalizations": [
+        "тип 01→01",
+        "DN80→80",
+        "PN16→16",
+        "плоский приварной→тип 01"
+      ]
+    },
+    {
+      "client": "Кран шаровой латунный внутренняя резьба/внутренняя резьба 1/2''",
+      "stock": "Кран шаровой латунный 11б27п1 LD Pride 15.B-B.Р Ду.15",
+      "match_type": "exact",
+      "key_normalizations": [
+        "внутренняя резьба/внутренняя резьба→вр-вр→B-B",
+        "1/2''→DN15",
+        "латунный→латунь"
+      ]
+    },
+    {
+      "client": "Затвор дисковый межфланцевый GROSS, DN80 PN16, корпус-чугун, диск-чугун, EPDM, с электроприводом",
+      "stock": "ГРАНВЭЛ Затвор Поворотный Дисковый ЗПВС - FL(w)-3-080-MN-Е, Ду080, Ру16",
+      "match_type": "analog",
+      "key_normalizations": [
+        "межфланцевый→м/фл→FL(w)",
+        "DN80→Ду080",
+        "с электроприводом→actuator",
+        "GROSS≠ГРАНВЭЛ (brand mismatch → analog)"
+      ]
+    },
+    {
+      "client": "Задвижка с обрезиненным клином со штурвалом, короткая, PN16, DN50",
+      "stock": "(РВЗ) Задвижка чуг. обр. 30ч539р Ду 50 Ру16, невыдв.шток",
+      "match_type": "analog",
+      "key_normalizations": [
+        "с обрезиненным клином→обр.→30ч539р",
+        "со штурвалом→actuator:handwheel",
+        "DN50→Ду 50"
+      ]
+    },
+    {
+      "client": "Тройник переходной полипропиленовый PPR, D40х20х40",
+      "stock": "Тройник полипропилен PPR D40x20x40",
+      "match_type": "exact",
+      "key_normalizations": [
+        "полипропиленовый PPR→PPR",
+        "D40х20х40→tripledn"
+      ]
+    },
+    {
+      "client": "Переход стальной концентрический Ду50x25 исп. 1 ГОСТ 17378-2001",
+      "stock": "Переход К-1- 60,3х3,0 - 33,7х3,0 Ст.20 ГОСТ 17378",
+      "match_type": "exact",
+      "key_normalizations": [
+        "концентрический→К",
+        "Ду50→OD 60.3",
+        "Ду25→OD 33.7",
+        "исп. 1→серия 1"
+      ]
+    },
+    {
+      "client": "Фильтр сетчатый чугунный фланцевый с магнитной вставкой DN50 PN16",
+      "stock": "Фильтр магнитный фланцевый ФМФ Ду.050 Ру.16 L=350",
+      "match_type": "exact",
+      "key_normalizations": [
+        "сетчатый чугунный фланцевый с магнитной вставкой→ФМФ",
+        "DN50→Ду.050"
+      ]
+    },
+    {
+      "client": "Труба полипропиленовая PP-R SDR 6 Ø20х3.4 ГОСТ 32415-2013",
+      "stock": "Труба PPR SDR6 d20x3.4 PN25",
+      "match_type": "exact",
+      "key_normalizations": [
+        "полипропиленовая PP-R→PPR",
+        "SDR 6→SDR6",
+        "Ø20х3.4→d20x3.4",
+        "ГОСТ 32415-2013→implicit"
+      ]
+    },
+    {
+      "client": "Переход полипропиленовый PPR, D32х25",
+      "stock": "Муфта переходная PP-R DN 32-25 Белая PRO AQUA",
+      "match_type": "exact",
+      "normalized_fields": {
+        "family": "perehod",
+        "subfamily": "coupling",
+        "material": "polypropylene_pp_r",
+        "d1": 32,
+        "d2": 25
+      },
+      "key_normalizations": []
+    },
+    {
+      "client": "Фланец стальной приварной встык тип 11 DN50 PN16",
+      "stock": "Фланец воротниковый 50-16-11-1-В-Ст.20-IV ГОСТ 33259 ЭК",
+      "match_type": "exact",
+      "normalized_fields": {
+        "family": "flange",
+        "subtype": "weld_neck",
+        "flange_type": "11",
+        "material": "steel",
+        "dn": 50,
+        "pn": 16,
+        "standard": "gost_33259"
+      },
+      "key_normalizations": []
+    },
+    {
+      "client": "Затвор дисковый межфланцевый ... корпус-чугун, диск-чугун, EPDM, с электроприводом",
+      "stock": "Затвор поворот.межфл.чуг./чуг. EPDM Ду80 Ру16 с эл/пр ...",
+      "match_type": "exact",
+      "normalized_fields": {
+        "family": "zatvor",
+        "connection": "interflange",
+        "body_material": "cast_iron",
+        "disc_material": "cast_iron",
+        "seal_material": "epdm",
+        "operator": "electric_actuator"
+      },
+      "key_normalizations": [],
+      "additional_stock_equivalents": [
+        "Затвор FAF 3550 Ду80 Ру16 межфл., корпус-чугун, диск-чугун GGG50, упл.-EPDM рукоятка"
+      ]
+    },
+    {
+      "client": "Редуктор F07 14х14 д/затв Ду125-150 четвертьоборотный",
+      "stock": "(РВЗ) Редуктор д/затв Ду 125-150 четвертьоборотный (F07 14X14)",
+      "match_type": "exact",
+      "normalized_fields": {
+        "family": "gearbox",
+        "for_family": "zatvor",
+        "mounting_pad": "f07",
+        "stem_square": "14x14",
+        "compatible_dn_range": "125-150",
+        "turn_type": "quarter_turn"
+      },
+      "key_normalizations": []
+    },
+    {
+      "client": "Патрубок до счетчика фланцевый, Ду65",
+      "stock": "Патрубок до счетчика ПДС Ду.40",
+      "match_type": "exact",
+      "normalized_fields": {
+        "family": "patrubok",
+        "subfamily": "pds",
+        "meter_side": "before",
+        "connection": "flanged",
+        "dn": 65
+      },
+      "key_normalizations": [],
+      "additional_stock_equivalents": [
+        "Патрубки комплект ПДС + ППС Ду.65"
+      ]
+    },
+    {
+      "client": "Воздухоотводчик автоматический DN15 SE.110.04",
+      "stock": "Воздухоотводчик латунный автоматический Ду.15 (1/2\") нар/р прямой",
+      "match_type": "exact",
+      "normalized_fields": {
+        "family": "vozduhootvod",
+        "subfamily": "automatic",
+        "dn": 15,
+        "series": "se_110_04"
+      },
+      "key_normalizations": []
+    }
+  ],
+  "risky_aliases_registry": {
+    "_comment": "Группы алиасов, которые могут быть ОПАСНЫМИ при слепом применении. Требуют ручной проверки.",
+    "high_risk": [
+      {
+        "group": "material_substitution",
+        "reason": "Нельзя менять материал без проверки. Ст.20 ≠ 09Г2С ≠ 12Х18Н10Т — это разные марки стали с разными свойствами.",
+        "safe_direction": "Нормализация формы записи: 'ст20' → 'Ст.20' — безопасно. Замена Ст.20 на 09Г2С — запрещено на уровне словаря.",
+        "examples": [
+          "Ст.20 ≠ 09Г2С",
+          "AISI304 ≠ AISI316",
+          "чугун ≠ ВЧШГ"
+        ]
+      },
+      {
+        "group": "dn_od_confusion",
+        "reason": "DN15 = OD 21.3 для фитингов, но OD 21.3 может быть DN15 ВГП (21.3мм) или DN15 труба бесшовная (другой OD). Таблица зависит от типа изделия.",
+        "safe_direction": "Использовать family_specific_hints для правильного маппинга DN↔OD в зависимости от семейства."
+      },
+      {
+        "group": "ppr_vs_pe_vs_pex",
+        "reason": "PPR (полипропилен), ПЭ (полиэтилен) и PEX (сшитый полиэтилен) — разные материалы. Нельзя нормализовать друг в друга.",
+        "safe_direction": "Каждый материал нормализуется только к своему каноническому обозначению."
+      },
+      {
+        "group": "gearbox_vs_actuator",
+        "reason": "'Редуктор' как самостоятельный товар (family=gearbox) vs 'с редуктором' как атрибут затвора/задвижки (actuator=gearbox). Контекст определяет.",
+        "safe_direction": "Проверять позицию в строке и наличие слов-якорей (затвор, задвижка)."
+      },
+      {
+        "group": "koleno_vs_otvod_vs_ugol",
+        "reason": "'Колено', 'отвод', 'угол' — синонимы для большинства контекстов, но 'колено' может быть грувлок-фитингом, а 'угол' — PPR-фитингом. Family один (elbow), но подтип может различаться.",
+        "safe_direction": "Нормализовать к единому family=elbow, но сохранять connection_type как атрибут."
+      },
+      {
+        "group": "seal_vs_body_material",
+        "reason": "'EPDM' — материал уплотнения, не корпуса. 'корпус-чугун, диск-чугун, EPDM' — три разных атрибута. Нельзя смешивать.",
+        "safe_direction": "EPDM/NBR/PTFE/Viton нормализуются как seal_material, не как material."
+      }
+    ],
+    "medium_risk": [
+      {
+        "group": "brand_mismatch",
+        "reason": "GROSS ≠ Гранвэл ≠ Benarmo ≠ LD — разные бренды. Товар может быть функционально аналогичен, но не exact match.",
+        "safe_direction": "Бренды не нормализуются друг к другу. Несовпадение бренда → статус analog, не exact."
+      },
+      {
+        "group": "short_vs_long_face_to_face",
+        "reason": "'короткая' задвижка ≠ 'длинная' — разные строительные длины. Это важный параметр для монтажа.",
+        "safe_direction": "Сохранять как атрибут face_to_face: short/long."
+      },
+      {
+        "group": "galvanized_vs_black",
+        "reason": "'оцинкованный' ≠ 'неоцинкованный' (черный). Для одних применений взаимозаменяемы, для других — нет.",
+        "safe_direction": "Сохранять как атрибут. Substitution_policy решает допустимость замены."
+      }
+    ]
+  }
+}

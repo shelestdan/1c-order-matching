@@ -332,7 +332,7 @@ FAMILY_PATTERNS = {
     "grooved": ("gruvlok",),
     "homut": ("homut",),
     "compensator": ("kompensator", "gibk", "vstavk"),
-    "kran": ("kran",),
+    "kran": ("kran", "kshc"),
     "klapan": ("klapan",),
     "manometer": ("manometr",),
     "mixer": ("smesitel",),
@@ -1482,6 +1482,9 @@ def extract_dimension_tags(*parts: object) -> set[str]:
     for match in re.findall(r"\bkvs\s*=?\s*([0-9]+(?:[.,][0-9]+)?)", text):
         tags.add(f"kvs:{match.replace(',', '.')}")
     for match in re.findall(r"\bl\.?\s*=?\s*([0-9]+(?:[.,][0-9]+)?)\s*mm", text):
+        tags.add(f"lmm:{match.replace(',', '.')}")
+    # Capture L=NNN without explicit mm unit (common in valve specs like КШЦП)
+    for match in re.findall(r"\bl\s*=\s*([0-9]+(?:[.,][0-9]+)?)(?!\s*mm)(?=\s|$)", text):
         tags.add(f"lmm:{match.replace(',', '.')}")
     for match in re.finditer(r"\b([0-9]+(?:[.,][0-9]+)?)\s*(?:mm|мм)\b", text):
         prefix = text[max(0, match.start() - 6) : match.start()]
