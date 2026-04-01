@@ -2762,8 +2762,14 @@ class StockMatcher:
             root_hits = self._accumulate_token_hits(order.root_tokens, self.root_index)
             soft_overlap = root_hits / float(len(order.root_tokens))
 
+        # Only count meaningful code tokens (len >= 4 or contains "." or "/")
+        # to match the same filter applied in score_candidate().
+        meaningful_order_codes = {
+            c for c in order.code_tokens
+            if len(c) >= 4 or "." in c or "/" in c
+        }
         code_hits = np.zeros(stock_count, dtype=bool)
-        for token in order.code_tokens:
+        for token in meaningful_order_codes:
             matches = self.code_index.get(token, [])
             if matches:
                 code_hits[matches] = True
@@ -3069,7 +3075,17 @@ def match_orders(
     for line in lines:
         candidates = matcher.find_candidates(line)
         match_kind, best, reason = matcher.classify(line, candidates)
-        if use_full_scan_fallback and match_kind != "exact":
+        # Use full NumPy scan as fallback only when token-based search is
+        # inconclusive: no candidates, low confidence, or nothing found at all.
+        # Skip when token-based already returned a confident analog (score ≥ 68)
+        # to avoid the per-item compatibility check overhead on every row.
+        needs_exhaustive = use_full_scan_fallback and match_kind != "exact" and (
+            not candidates
+            or match_kind == "not_found"
+            or best is None
+            or best.score < 68.0
+        )
+        if needs_exhaustive:
             exhaustive_candidates = matcher.find_candidates_exhaustive(line, limit=5)
             exhaustive_kind, exhaustive_best, exhaustive_reason = matcher.classify(line, exhaustive_candidates)
             candidates = exhaustive_candidates

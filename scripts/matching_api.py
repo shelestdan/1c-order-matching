@@ -82,6 +82,14 @@ _stock_cache: dict[str, Any] = {
     "base_stock": None,
 }
 
+# Master StockMatcher (read-only indexes) — forked per job so index building
+# happens only once per stock file version, not once per job.
+_matcher_cache: dict[str, Any] = {
+    "path": None,
+    "mtime": None,
+    "master_matcher": None,
+}
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
@@ -161,7 +169,38 @@ def _load_cached_stock() -> tuple[Path, list[Any]]:
     _stock_cache["path"] = str(stock_path)
     _stock_cache["mtime"] = mtime
     _stock_cache["base_stock"] = base_stock
+    # Invalidate matcher cache when stock changes
+    _matcher_cache["master_matcher"] = None
     return stock_path, base_stock
+
+
+def _load_cached_matcher() -> "StockMatcher":
+    """Return the master StockMatcher, building it once per stock version.
+
+    Callers must call .fork() on the result to get a job-local copy with
+    independent remaining-quantity tracking.
+    """
+    stock_path, base_stock = _load_cached_stock()
+    mtime = stock_path.stat().st_mtime
+    if (
+        _matcher_cache["path"] == str(stock_path)
+        and _matcher_cache["mtime"] == mtime
+        and _matcher_cache["master_matcher"] is not None
+    ):
+        return _matcher_cache["master_matcher"]
+
+    reviewed_decisions = load_reviewed_analog_decisions(DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH)
+    substitution_policy = load_substitution_policy()
+    stock_items = clone_stock_items(base_stock)
+    master = StockMatcher(
+        stock_items,
+        reviewed_analog_decisions=reviewed_decisions,
+        substitution_policy=substitution_policy,
+    )
+    _matcher_cache["path"] = str(stock_path)
+    _matcher_cache["mtime"] = mtime
+    _matcher_cache["master_matcher"] = master
+    return master
 
 
 def _rebuild_status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -325,12 +364,9 @@ def _run_pipeline(upload_path: Path, job_dir: Path) -> dict[str, Any]:
     # Stage 1: normalize
     normalized_path, parsed_count, issue_count = normalize_request_file(upload_path, normalized_dir)
 
-    # Stage 2: match
-    stock_path, base_stock = _load_cached_stock()
-    reviewed_decisions = load_reviewed_analog_decisions(DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH)
-    substitution_policy = load_substitution_policy()
-    stock_items = clone_stock_items(base_stock)
-    matcher = StockMatcher(stock_items, reviewed_analog_decisions=reviewed_decisions, substitution_policy=substitution_policy)
+    # Stage 2: match — fork the cached master matcher (indexes are pre-built)
+    stock_path, _ = _load_cached_stock()
+    matcher = _load_cached_matcher().fork()
     order_lines = load_order_lines(normalized_path)
     order_results = match_orders(order_lines, matcher)
 
@@ -521,14 +557,8 @@ def search_stock_for_row(job_id: str, body: ManualSearchRequest, authorization: 
     if len(query) < 2:
         raise HTTPException(400, "Введите минимум 2 символа для поиска")
 
-    stock_path, base_stock = _load_cached_stock()
-    reviewed_decisions = load_reviewed_analog_decisions(DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH)
-    substitution_policy = load_substitution_policy()
-    matcher = StockMatcher(
-        clone_stock_items(base_stock),
-        reviewed_analog_decisions=reviewed_decisions,
-        substitution_policy=substitution_policy,
-    )
+    stock_path, _ = _load_cached_stock()
+    matcher = _load_cached_matcher().fork()
     candidates = _manual_search_candidates(matcher, row, query, limit=body.limit)
     results = [_serialize_candidate(candidate) for candidate in candidates]
 
