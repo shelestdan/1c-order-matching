@@ -124,6 +124,11 @@ body {
 .btn-approve-sm.btn-selected { background: var(--approved); }
 .btn-approve-sm.btn-selected:hover { background: #6d28d9; }
 
+.replace-btn { font-size: 12px; opacity: .6; }
+.replace-btn:hover { opacity: 1; }
+
+.action-stack { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+
 /* ===== Header ===== */
 .app-header {
   display: flex;

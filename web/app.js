@@ -171,7 +171,9 @@ function renderResults(data) {
   const counts = data.status_counts || {};
   const exactCount = (counts['Найдено полностью'] || 0) + (counts['Найдено частично'] || 0);
   const safeCount = counts['Безопасный аналог'] || 0;
-  const approvalCount = counts['Нужна проверка аналога'] || 0;
+  const approvalCount = (counts['Нужна проверка аналога'] || 0)
+                      + (counts['Допустимая замена по согласованию'] || 0)
+                      + (counts['Найдено, но остаток уже распределен'] || 0);
   const approvedCount = counts['Одобрена замена'] || 0;
   const notfoundCount = counts['Не найдено'] || 0;
 
@@ -185,12 +187,14 @@ function renderResults(data) {
 }
 
 const STATUS_MAP = {
-  'Найдено полностью':     { cls: 'exact',    label: 'Найдено' },
-  'Найдено частично':      { cls: 'exact',    label: 'Найдено ч.' },
-  'Безопасный аналог':     { cls: 'safe',     label: 'Аналог ✓' },
-  'Нужна проверка аналога':{ cls: 'approval', label: 'На проверку' },
-  'Одобрена замена':       { cls: 'approved', label: 'Одобрено' },
-  'Не найдено':            { cls: 'notfound', label: 'Не найдено' },
+  'Найдено полностью':                   { cls: 'exact',    label: 'Найдено' },
+  'Найдено частично':                    { cls: 'exact',    label: 'Найдено ч.' },
+  'Безопасный аналог':                   { cls: 'safe',     label: 'Аналог ✓' },
+  'Нужна проверка аналога':              { cls: 'approval', label: 'На согласование' },
+  'Допустимая замена по согласованию':   { cls: 'approval', label: 'На согласование' },
+  'Найдено, но остаток уже распределен': { cls: 'approval', label: 'Нет в наличии' },
+  'Одобрена замена':                     { cls: 'approved', label: 'Одобрено' },
+  'Не найдено':                          { cls: 'notfound', label: 'Не найдено' },
 };
 
 function filterRows(filter) {
@@ -203,7 +207,12 @@ function filterRows(filter) {
   if (filter === 'exact') {
     rows = allRows.filter(r => r.status === 'Найдено полностью' || r.status === 'Найдено частично');
   } else if (filter === 'analog') {
-    rows = allRows.filter(r => r.status === 'Безопасный аналог' || r.status === 'Нужна проверка аналога');
+    rows = allRows.filter(r =>
+      r.status === 'Безопасный аналог' ||
+      r.status === 'Нужна проверка аналога' ||
+      r.status === 'Допустимая замена по согласованию' ||
+      r.status === 'Найдено, но остаток уже распределен'
+    );
   } else if (filter === 'approved') {
     rows = allRows.filter(r => r.status === 'Одобрена замена');
   } else if (filter === 'notfound') {
@@ -243,6 +252,13 @@ function renderTable(rows) {
   });
 }
 
+const APPROVAL_STATUSES = new Set([
+  'Нужна проверка аналога',
+  'Допустимая замена по согласованию',
+  'Найдено, но остаток уже распределен',
+  'Безопасный аналог',
+]);
+
 function buildMatchCell(row) {
   if (row.approved_analog) {
     const a = row.approved_analog;
@@ -255,33 +271,37 @@ function buildMatchCell(row) {
             <div class="match-code">${esc(row.matched_code || '')}</div>
             ${row.comment ? `<div class="match-comment">${esc(row.comment)}</div>` : ''}`;
   }
-  if (row.status === 'Нужна проверка аналога' && row.analogs && row.analogs.length) {
+  if (APPROVAL_STATUSES.has(row.status) && row.analogs && row.analogs.length) {
     const a = row.analogs[0];
+    const zeroStock = a.remaining === 0 || a.remaining === '0';
     return `<div class="match-name">${esc(a.name)}</div>
             <div class="match-code">${esc(a.code_1c)}</div>
-            <div class="match-comment">Лучший аналог (score ${a.score})</div>`;
+            <div class="match-comment">${zeroStock ? '<span style="color:var(--notfound)">Нет в наличии · </span>' : ''}Лучший аналог (score ${a.score})</div>`;
   }
   return `<span style="color:var(--text-muted)">—</span>`;
 }
 
 function buildActionCell(row) {
+  const id = row.id;
   if (row.status === 'Не найдено') {
-    return `<button class="btn btn-secondary btn-sm" onclick="openModal('${row.id}')">Найти товар</button>`;
-  }
-  if (row.status === 'Нужна проверка аналога' && !row.approved_analog) {
-    const hasAnalogs = row.analogs && row.analogs.length > 0;
-    if (hasAnalogs) {
-      return `<button class="btn btn-approve btn-sm" onclick="openModal('${row.id}')">Выбрать аналог</button>`;
-    }
-    return `<button class="btn btn-secondary btn-sm" onclick="openModal('${row.id}')">Найти товар</button>`;
+    return `<button class="btn btn-secondary btn-sm" onclick="openModal('${id}')">Найти товар</button>`;
   }
   if (row.status === 'Одобрена замена') {
-    return `<button class="btn btn-secondary btn-sm" onclick="openModal('${row.id}')">Изменить</button>`;
+    return `<button class="btn btn-secondary btn-sm" onclick="openModal('${id}')">Изменить</button>`;
   }
   if (row.status === 'Безопасный аналог') {
-    return `<button class="btn btn-ghost btn-sm" onclick="openModal('${row.id}')">Другой аналог</button>`;
+    return `<div class="action-stack">
+      <button class="btn btn-ghost btn-sm" onclick="openModal('${id}')">Другой аналог</button>
+      <button class="btn btn-ghost btn-sm replace-btn" onclick="openModal('${id}')">Заменить</button>
+    </div>`;
   }
-  return '';
+  if (APPROVAL_STATUSES.has(row.status) && !row.approved_analog) {
+    const hasAnalogs = row.analogs && row.analogs.length > 0;
+    return `<button class="btn ${hasAnalogs ? 'btn-approve' : 'btn-secondary'} btn-sm"
+      onclick="openModal('${id}')">${hasAnalogs ? 'Выбрать аналог' : 'Найти товар'}</button>`;
+  }
+  // Exact match — small ghost button to replace if needed
+  return `<button class="btn btn-ghost btn-sm replace-btn" onclick="openModal('${id}')">Заменить</button>`;
 }
 
 function esc(str) {
@@ -304,7 +324,9 @@ function openModal(rowId) {
     `${row.name}${row.mark ? ' · ' + row.mark : ''}${row.vendor ? ' · ' + row.vendor : ''}`;
 
   const searchInput = document.getElementById('manual-search-input');
-  searchInput.value = row.mark || row.name || '';
+  // Pre-fill with mark/code if available, otherwise use name truncated to 60 chars
+  const prefill = row.mark || row.matched_code || '';
+  searchInput.value = prefill || (row.name || '').substring(0, 60);
 
   renderCandidateList('analog-list', row.analogs || [], rowId, 'analog');
   renderCandidateList('search-results-list', searchResultsByRow[rowId] || [], rowId, 'search');
