@@ -590,6 +590,10 @@ PARSER_ALIAS_TAGS = {
     "impeller_meter": ("meter_type:impeller",),
     "pulse_output": ("pulse_output:true",),
     "rs485": ("interface:rs-485",),
+    # Legacy flange GOSTs → current standard + subtype tags
+    "flange_gost_33259": ("family:flange", "spec:33259"),
+    "flange_flat_welded": ("family:flange", "type:01"),
+    "flange_weld_neck": ("family:flange", "type:11"),
 }
 
 PARSER_FAMILY_CANONICAL = {
@@ -1166,7 +1170,13 @@ def expand_search_token_variants(token: str) -> list[str]:
 
     standard_match = re.fullmatch(r"(?P<std>\d{5})(?:-(?P<year>\d{2,4}))?", token)
     if standard_match:
-        variants.append(f"spec{standard_match.group('std')}")
+        std_num = standard_match.group("std")
+        variants.append(f"spec{std_num}")
+        # Legacy flange GOSTs superseded by ГОСТ 33259-2015
+        if std_num == "12820":  # плоские приварные → тип 01
+            variants.extend(["spec33259", "type01", "subtypeflat"])
+        elif std_num == "12821":  # воротниковые → тип 11
+            variants.extend(["spec33259", "type11", "subtypeweld"])
     else:
         embedded_standard_match = re.match(r"(?P<std>\d{5})(?:[-/].*)?$", token)
         if embedded_standard_match:
@@ -1532,6 +1542,11 @@ def extract_dimension_tags(*parts: object) -> set[str]:
         tags.add(f"mat:{match}")
     for match in re.findall(r"\b(?:gost|гост)\s*([0-9]{5})\b", text):
         tags.add(f"spec:{match}")
+    # Legacy flange GOSTs → map to current ГОСТ 33259-2015
+    if re.search(r"\b(?:gost|гост)\s*12820\b", text):
+        tags.update({"spec:33259", "family:flange", "type:01"})
+    if re.search(r"\b(?:gost|гост)\s*12821\b", text):
+        tags.update({"spec:33259", "family:flange", "type:11"})
     for match in re.findall(r"\b(15|30|45|60|87|90|120|180)\s*-\s*([12])\s*-\s*\d{2,4}\s*[xхh]", text):
         tags.add(f"deg:{match[0]}")
         tags.add(f"series:{match[1]}")
