@@ -398,6 +398,45 @@ tr.row-notfound td:first-child { border-left: 3px solid var(--notfound); }
   border-bottom: 1px solid var(--border);
 }
 
+.modal-search {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.modal-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+  outline: none;
+}
+
+.modal-search input:focus {
+  border-color: var(--primary);
+}
+
+.modal-search-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+}
+
+.modal-section {
+  margin-top: 16px;
+}
+
+.modal-section-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-bottom: 10px;
+}
+
 /* Analog cards in modal */
 .analog-card {
   border: 1px solid var(--border);
@@ -429,6 +468,15 @@ tr.row-notfound td:first-child { border-left: 3px solid var(--notfound); }
 }
 
 .analog-action { flex-shrink: 0; align-self: center; }
+
+.empty-state {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  color: var(--text-muted);
+  font-size: 13px;
+  background: #fafbfc;
+}
 
 /* ===== History ===== */
 .history-list { margin: 16px 0; }

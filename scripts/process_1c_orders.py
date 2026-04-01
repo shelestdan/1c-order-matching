@@ -1379,14 +1379,24 @@ def extract_root_tokens(tokens: Iterable[str]) -> set[str]:
 
 def extract_code_tokens(*parts: object) -> set[str]:
     tokens: set[str] = set()
+    # Material grade patterns to exclude from code tokens — these are NOT product codes
+    _MATERIAL_GRADE_RE = re.compile(
+        r"^(?:ct\.?\d+|st\.?\d+|09g2s|12x18h10t|12kh18n10t|aisi\d+|a351|cf8[m]?|ggg\d+|"
+        r"vch\d+|sch\d+|l?63|cw617n|cuzn\d+)$",
+        re.IGNORECASE,
+    )
     for part in parts:
         raw = normalize_symbols(clean_text(part))
         if not raw:
             continue
         for token in TOKEN_RE.findall(raw):
-            if not DIGIT_RE.search(token):
+            has_digit = bool(DIGIT_RE.search(token))
+            has_letter = bool(re.search(r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ]", token))
+            # Allow pure-uppercase abbreviations >= 3 chars (КШЦП, КШЦМ, КШЦПР, etc.)
+            is_uppercase_abbrev = bool(re.fullmatch(r"[A-ZА-ЯЁ]{3,}", token))
+            if not has_letter:
                 continue
-            if not re.search(r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ]", token):
+            if not has_digit and not is_uppercase_abbrev:
                 continue
             skeleton_chars: list[str] = []
             for char in fix_mixed_script_token(token):
@@ -1413,6 +1423,9 @@ def extract_code_tokens(*parts: object) -> set[str]:
             if re.fullmatch(r"[a-z]{1,2}\d+(?:[./-]\d+)*", skeleton) and skeleton[:2] in {"dn", "du", "pn", "ru"}:
                 continue
             if len(skeleton) >= 3:
+                # Filter out material grades — they are NOT product codes
+                if _MATERIAL_GRADE_RE.fullmatch(skeleton):
+                    continue
                 tokens.add(skeleton)
     return tokens
 
@@ -2621,10 +2634,19 @@ class StockMatcher:
         reasons: list[str] = []
 
         code_hit = False
-        if order.code_tokens and stock.code_tokens and (order.code_tokens & stock.code_tokens):
-            code_hit = True
-            score += 18.0
-            reasons.append("совпадает код/марка")
+        if order.code_tokens and stock.code_tokens:
+            shared_codes = order.code_tokens & stock.code_tokens
+            if shared_codes:
+                # Require at least one shared code that is 4+ chars or contains a dot/slash
+                # (filters out trivially short matches like "l63")
+                meaningful = any(
+                    len(c) >= 4 or "." in c or "/" in c
+                    for c in shared_codes
+                )
+                if meaningful:
+                    code_hit = True
+                    score += 18.0
+                    reasons.append("совпадает код/марка")
 
         order_dimensions = expand_dimension_values(group_dimension_tags(order.dimension_tags))
         stock_dimensions = expand_dimension_values(group_dimension_tags(stock.dimension_tags))
@@ -2930,7 +2952,7 @@ class StockMatcher:
         _, policy = self._policy_for_order(order, best)
         generic_exact_allowed = not policy or bool(policy.get("allow_exact"))
 
-        if best.code_hit and best.dimension_penalty == 0 and best.score >= 78:
+        if best.code_hit and best.dimension_penalty == 0 and best.score >= 78 and best.overlap >= 0.30:
             return "exact", best, "совпал код/марка"
         for candidate in candidates:
             policy_exact_reason = self._exact_reason_by_policy(order, candidate)

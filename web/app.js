@@ -8,6 +8,7 @@ let currentJob = null;
 let allRows = [];
 let currentFilter = 'all';
 let pendingApprovals = {};  // row_id -> analog code_1c
+let searchResultsByRow = {}; // row_id -> manual search results
 
 /* ===== Init ===== */
 document.addEventListener('DOMContentLoaded', () => {
@@ -46,6 +47,14 @@ document.addEventListener('DOMContentLoaded', () => {
     e.preventDefault();
     dz.classList.remove('dragover');
     if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+
+  const manualSearchInput = document.getElementById('manual-search-input');
+  manualSearchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      runManualSearch();
+    }
   });
 });
 
@@ -119,6 +128,7 @@ async function handleFile(file) {
     currentJob = data;
     allRows = data.rows || [];
     pendingApprovals = {};
+    searchResultsByRow = {};
     renderResults(data);
   } catch (ex) {
     document.getElementById('progress-text').textContent = 'Ошибка обработки';
@@ -229,16 +239,20 @@ function buildMatchCell(row) {
 }
 
 function buildActionCell(row) {
+  if (row.status === 'Не найдено') {
+    return `<button class="btn btn-secondary btn-sm" onclick="openModal('${row.id}')">Найти товар</button>`;
+  }
   if (row.status === 'Нужна проверка аналога' && !row.approved_analog) {
     const hasAnalogs = row.analogs && row.analogs.length > 0;
     if (hasAnalogs) {
       return `<button class="btn btn-approve btn-sm" onclick="openModal('${row.id}')">Выбрать аналог</button>`;
     }
+    return `<button class="btn btn-secondary btn-sm" onclick="openModal('${row.id}')">Найти товар</button>`;
   }
   if (row.status === 'Одобрена замена') {
     return `<button class="btn btn-secondary btn-sm" onclick="openModal('${row.id}')">Изменить</button>`;
   }
-  if (row.status === 'Безопасный аналог' && row.analogs && row.analogs.length > 1) {
+  if (row.status === 'Безопасный аналог') {
     return `<button class="btn btn-ghost btn-sm" onclick="openModal('${row.id}')">Другой аналог</button>`;
   }
   return '';
@@ -263,34 +277,11 @@ function openModal(rowId) {
   document.getElementById('modal-order-name').textContent =
     `${row.name}${row.mark ? ' · ' + row.mark : ''}${row.vendor ? ' · ' + row.vendor : ''}`;
 
-  const list = document.getElementById('analog-list');
-  list.innerHTML = '';
+  const searchInput = document.getElementById('manual-search-input');
+  searchInput.value = row.mark || row.name || '';
 
-  (row.analogs || []).forEach(a => {
-    const isSelected = row.approved_analog?.code_1c === a.code_1c
-      || pendingApprovals[rowId] === a.code_1c;
-    const card = document.createElement('div');
-    card.className = 'analog-card';
-    card.innerHTML = `
-      <div class="analog-info">
-        <div class="analog-name">${esc(a.name)}</div>
-        <div class="analog-code">${esc(a.code_1c)}</div>
-        <div class="analog-meta">
-          <span>Score: <strong>${a.score}</strong></span>
-          ${a.remaining != null ? `<span>Остаток: <strong>${a.remaining}</strong></span>` : ''}
-          ${a.price != null ? `<span>Цена: <strong>${a.price}</strong></span>` : ''}
-        </div>
-        ${a.reasons && a.reasons.length ? `<div class="analog-reasons">${a.reasons.map(esc).join('; ')}</div>` : ''}
-      </div>
-      <div class="analog-action">
-        <button class="btn btn-approve-sm ${isSelected ? 'btn-selected' : ''}"
-          onclick="selectAnalog('${rowId}', '${esc(a.code_1c)}')">
-          ${isSelected ? '✓ Выбрано' : 'Выбрать'}
-        </button>
-      </div>
-    `;
-    list.appendChild(card);
-  });
+  renderCandidateList('analog-list', row.analogs || [], rowId, 'analog');
+  renderCandidateList('search-results-list', searchResultsByRow[rowId] || [], rowId, 'search');
 
   document.getElementById('analog-modal').style.display = 'flex';
 }
@@ -336,6 +327,106 @@ async function selectAnalog(rowId, code) {
     renderResults(currentJob);
   } catch (ex) {
     alert('Ошибка: ' + ex.message);
+  }
+}
+
+function renderCandidateList(containerId, candidates, rowId, source) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = '';
+  if (!candidates || !candidates.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = source === 'search'
+      ? 'Введите запрос и выполните поиск по остаткам.'
+      : 'Для этой строки пока нет предложенных аналогов.';
+    container.appendChild(empty);
+    return;
+  }
+
+  candidates.forEach((candidate) => {
+    const isSelected = pendingApprovals[rowId] === candidate.code_1c
+      || allRows.find(r => r.id === rowId)?.approved_analog?.code_1c === candidate.code_1c;
+    const card = document.createElement('div');
+    card.className = 'analog-card';
+    card.innerHTML = `
+      <div class="analog-info">
+        <div class="analog-name">${esc(candidate.name)}</div>
+        <div class="analog-code">${esc(candidate.code_1c)}</div>
+        <div class="analog-meta">
+          ${candidate.score != null ? `<span>Score: <strong>${candidate.score}</strong></span>` : ''}
+          ${candidate.remaining != null ? `<span>Остаток: <strong>${candidate.remaining}</strong></span>` : ''}
+          ${candidate.price != null && candidate.price !== '' ? `<span>Цена: <strong>${candidate.price}</strong></span>` : ''}
+          ${source === 'search' ? `<span>Источник: <strong>поиск</strong></span>` : ''}
+        </div>
+        ${candidate.reasons && candidate.reasons.length ? `<div class="analog-reasons">${candidate.reasons.map(esc).join('; ')}</div>` : ''}
+      </div>
+      <div class="analog-action">
+        <button class="btn btn-approve-sm ${isSelected ? 'btn-selected' : ''}"
+          onclick="chooseCandidate('${rowId}', '${source}', '${esc(candidate.code_1c)}')">
+          ${isSelected ? '✓ Выбрано' : 'Выбрать'}
+        </button>
+      </div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+async function runManualSearch() {
+  if (!currentJob || !modalRowId) return;
+  const input = document.getElementById('manual-search-input');
+  const query = input.value.trim();
+  if (query.length < 2) {
+    alert('Введите минимум 2 символа для поиска');
+    return;
+  }
+  const list = document.getElementById('search-results-list');
+  list.innerHTML = '<div class="empty-state">Ищем по остаткам...</div>';
+  try {
+    const res = await apiFetch(`/api/jobs/${currentJob.job_id}/search`, 'POST', {
+      row_id: modalRowId,
+      query,
+      limit: 12,
+    });
+    searchResultsByRow[modalRowId] = res.results || [];
+    renderCandidateList('search-results-list', searchResultsByRow[modalRowId], modalRowId, 'search');
+  } catch (ex) {
+    list.innerHTML = `<div class="empty-state">Ошибка поиска: ${esc(ex.message || 'неизвестная ошибка')}</div>`;
+  }
+}
+
+async function chooseCandidate(rowId, source, code) {
+  if (source === 'analog') {
+    await selectAnalog(rowId, code);
+    return;
+  }
+  const candidates = searchResultsByRow[rowId] || [];
+  const candidate = candidates.find(item => item.code_1c === code);
+  if (!candidate) {
+    alert('Кандидат поиска не найден');
+    return;
+  }
+  try {
+    const res = await apiFetch(`/api/jobs/${currentJob.job_id}/select`, 'POST', {
+      row_id: rowId,
+      candidate,
+    });
+    pendingApprovals[rowId] = code;
+    const row = allRows.find(r => r.id === rowId);
+    if (row) {
+      row.approved_analog = candidate;
+      row.status = 'Одобрена замена';
+      row.analogs = row.analogs || [];
+      if (!row.analogs.some(a => a.code_1c === candidate.code_1c)) {
+        row.analogs.unshift(candidate);
+      }
+    }
+    if (currentJob && res.status_counts) {
+      currentJob.status_counts = res.status_counts;
+    }
+    closeModal();
+    renderResults(currentJob);
+  } catch (ex) {
+    alert('Ошибка выбора: ' + ex.message);
   }
 }
 

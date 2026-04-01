@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import tempfile
@@ -31,9 +32,21 @@ from pydantic import BaseModel
 
 from normalize_client_requests import ensure_output_dir, normalize_request_file
 from process_1c_orders import (
+    Candidate,
     DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH,
+    OrderLine,
     StockMatcher,
+    augment_search_text_with_dimension_tags,
+    build_search_text,
     clone_stock_items,
+    extract_code_tokens,
+    extract_dimension_tags,
+    extract_family_tags,
+    extract_key_tokens,
+    extract_material_tags_from_search_text,
+    extract_parser_hint_tags,
+    extract_root_tokens,
+    extract_tokens,
     load_order_lines,
     load_reviewed_analog_decisions,
     load_stock,
@@ -57,6 +70,17 @@ SHARED_PASSWORD = os.environ.get("MATCHING_PASSWORD", "demo2026")
 _sessions: dict[str, float] = {}
 
 SESSION_TTL = 60 * 60 * 8  # 8 hours
+MANUAL_SEARCH_LIMIT = 12
+MANUAL_SEARCH_MIN_SCORE = 28.0
+MANUAL_SEARCH_MIN_OVERLAP = 0.12
+MANUAL_SEARCH_MIN_SOFT_OVERLAP = 0.18
+MANUAL_SEARCH_MIN_DIMENSION_BONUS = 6.0
+
+_stock_cache: dict[str, Any] = {
+    "path": None,
+    "mtime": None,
+    "base_stock": None,
+}
 
 # ---------------------------------------------------------------------------
 # App
@@ -124,6 +148,175 @@ def _find_stock_file() -> Path:
     raise HTTPException(500, "No stock file found in inputs/stock/")
 
 
+def _load_cached_stock() -> tuple[Path, list[Any]]:
+    stock_path = _find_stock_file()
+    mtime = stock_path.stat().st_mtime
+    if (
+        _stock_cache["path"] == str(stock_path)
+        and _stock_cache["mtime"] == mtime
+        and _stock_cache["base_stock"] is not None
+    ):
+        return stock_path, _stock_cache["base_stock"]
+    base_stock = load_stock(stock_path)
+    _stock_cache["path"] = str(stock_path)
+    _stock_cache["mtime"] = mtime
+    _stock_cache["base_stock"] = base_stock
+    return stock_path, base_stock
+
+
+def _rebuild_status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = row["status"]
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _serialize_candidate(analog) -> dict[str, Any]:
+    return {
+        "code_1c": analog.stock.code_1c,
+        "name": analog.stock.name,
+        "score": round(analog.score, 1),
+        "remaining": analog.stock.remaining,
+        "price": analog.stock.sale_price,
+        "reasons": analog.reasons,
+    }
+
+
+def _build_manual_search_order(row: dict[str, Any], query: str) -> OrderLine:
+    # Manual search is intentionally query-first: the manager is searching
+    # the stock itself, not asking the matcher to keep the original row
+    # constraints. This makes it possible to type any stock code/name and
+    # choose it for export.
+    name = (query or "").strip()
+    mark = ""
+    vendor = ""
+    unit = (row.get("unit") or "").strip()
+    requested_qty = float(row.get("requested_qty") or 0.0)
+    query_parts = [name]
+    raw_query = " | ".join(part for part in query_parts if part)
+    search_text = build_search_text(*query_parts)
+    dimension_tags = (
+        extract_dimension_tags(*query_parts)
+        | extract_family_tags(*query_parts)
+        | extract_parser_hint_tags(*query_parts)
+        | extract_material_tags_from_search_text(search_text)
+    )
+    search_text = augment_search_text_with_dimension_tags(search_text, dimension_tags)
+    search_tokens = extract_tokens(search_text)
+    return OrderLine(
+        source_file="manual_search",
+        sheet_name="manual_search",
+        source_row=0,
+        headers=[],
+        row_values=[],
+        position=str(row.get("position") or ""),
+        name=name,
+        mark=mark,
+        supplier_code="",
+        vendor=vendor,
+        unit=unit,
+        requested_qty=requested_qty,
+        search_text=search_text,
+        search_tokens=search_tokens,
+        key_tokens=extract_key_tokens(search_tokens),
+        root_tokens=extract_root_tokens(search_tokens),
+        code_tokens=extract_code_tokens(*query_parts),
+        dimension_tags=dimension_tags,
+        raw_query=raw_query or name,
+        classification=None,
+    )
+
+
+def _normalize_manual_code(value: str) -> str:
+    return re.sub(r"[^0-9a-zа-я]+", "", value.lower())
+
+
+def _manual_search_candidates(
+    matcher: StockMatcher,
+    row: dict[str, Any],
+    query: str,
+    limit: int,
+) -> list[Candidate]:
+    manual_order = _build_manual_search_order(row, query)
+    query_lower = query.strip().lower()
+    normalized_code_query = _normalize_manual_code(query)
+    ranked: list[Candidate] = []
+
+    for stock in matcher.stock_items:
+        candidate = matcher.score_candidate(manual_order, stock)
+        reasons = list(candidate.reasons)
+        score = candidate.score
+
+        stock_code_lower = (stock.code_1c or "").lower()
+        stock_name_lower = (stock.name or "").lower()
+        normalized_stock_code = _normalize_manual_code(stock.code_1c or "")
+
+        if query_lower and stock_code_lower == query_lower:
+            score = max(score, 100.0)
+            reasons.append("точное совпадение по коду 1С")
+        elif normalized_code_query and normalized_stock_code and normalized_code_query == normalized_stock_code:
+            score = max(score, 98.0)
+            reasons.append("совпадает нормализованный код")
+        elif query_lower and (query_lower in stock_code_lower or query_lower in stock_name_lower):
+            score = max(score, min(96.0, score + 20.0))
+            reasons.append("совпадение по фрагменту кода/названия")
+
+        ranked.append(
+            Candidate(
+                stock=candidate.stock,
+                score=max(0.0, min(100.0, score)),
+                overlap=candidate.overlap,
+                reasons=tuple(dict.fromkeys(reasons)),
+                code_hit=bool(candidate.code_hit or (normalized_code_query and normalized_stock_code == normalized_code_query)),
+                dimension_bonus=candidate.dimension_bonus,
+                dimension_penalty=candidate.dimension_penalty,
+                soft_overlap=candidate.soft_overlap,
+                matched_dimension_keys=candidate.matched_dimension_keys,
+                conflicting_dimension_keys=candidate.conflicting_dimension_keys,
+                review_decision=candidate.review_decision,
+            )
+        )
+
+    ranked.sort(
+        key=lambda candidate: (
+            candidate.score,
+            candidate.code_hit,
+            candidate.stock.remaining > 0,
+            candidate.stock.remaining,
+            -candidate.stock.row_index,
+        ),
+        reverse=True,
+    )
+
+    filtered: list[Candidate] = []
+    seen_codes: set[str] = set()
+    for candidate in ranked:
+        code = candidate.stock.code_1c
+        if not code or code in seen_codes:
+            continue
+        if (
+            candidate.score < MANUAL_SEARCH_MIN_SCORE
+            and not candidate.code_hit
+            and candidate.overlap < MANUAL_SEARCH_MIN_OVERLAP
+            and candidate.soft_overlap < MANUAL_SEARCH_MIN_SOFT_OVERLAP
+            and candidate.dimension_bonus < MANUAL_SEARCH_MIN_DIMENSION_BONUS
+        ):
+            continue
+        filtered.append(candidate)
+        seen_codes.add(code)
+        if len(filtered) >= limit:
+            break
+    return filtered
+
+
+def _find_row(data: dict[str, Any], row_id: str) -> dict[str, Any]:
+    for row in data["rows"]:
+        if row["id"] == row_id:
+            return row
+    raise HTTPException(404, f"Row {row_id} not found")
+
+
 def _run_pipeline(upload_path: Path, job_dir: Path) -> dict[str, Any]:
     """Run the full normalization + matching pipeline."""
     normalized_dir = ensure_output_dir(job_dir / "normalized")
@@ -133,10 +326,9 @@ def _run_pipeline(upload_path: Path, job_dir: Path) -> dict[str, Any]:
     normalized_path, parsed_count, issue_count = normalize_request_file(upload_path, normalized_dir)
 
     # Stage 2: match
-    stock_path = _find_stock_file()
+    stock_path, base_stock = _load_cached_stock()
     reviewed_decisions = load_reviewed_analog_decisions(DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH)
     substitution_policy = load_substitution_policy()
-    base_stock = load_stock(stock_path)
     stock_items = clone_stock_items(base_stock)
     matcher = StockMatcher(stock_items, reviewed_analog_decisions=reviewed_decisions, substitution_policy=substitution_policy)
     order_lines = load_order_lines(normalized_path)
@@ -156,14 +348,10 @@ def _run_pipeline(upload_path: Path, job_dir: Path) -> dict[str, Any]:
     for result in order_results:
         analogs_list = []
         for analog in result.analogs:
-            analogs_list.append({
-                "code_1c": analog.stock.code_1c,
-                "name": analog.stock.name,
-                "score": round(analog.score, 1),
-                "remaining": analog.stock.remaining + (result.available_qty if analog.stock.code_1c == (result.matched_stock.code_1c if result.matched_stock else None) else 0),
-                "price": analog.stock.sale_price,
-                "reasons": analog.reasons,
-            })
+            payload = _serialize_candidate(analog)
+            if analog.stock.code_1c == (result.matched_stock.code_1c if result.matched_stock else None):
+                payload["remaining"] = payload["remaining"] + result.available_qty
+            analogs_list.append(payload)
 
         row: dict[str, Any] = {
             "id": str(uuid.uuid4())[:8],
@@ -311,14 +499,84 @@ def approve_analogs(job_id: str, body: ApproveRequest, authorization: str | None
                     break
 
     # Recalculate status counts
-    status_counts: dict[str, int] = {}
-    for r in data["rows"]:
-        s = r["status"]
-        status_counts[s] = status_counts.get(s, 0) + 1
+    status_counts = _rebuild_status_counts(data["rows"])
     data["status_counts"] = status_counts
 
     _save_job(job_id, data)
     return {"approved_count": approved_count, "status_counts": status_counts}
+
+
+class ManualSearchRequest(BaseModel):
+    row_id: str
+    query: str
+    limit: int = MANUAL_SEARCH_LIMIT
+
+
+@app.post("/api/jobs/{job_id}/search")
+def search_stock_for_row(job_id: str, body: ManualSearchRequest, authorization: str | None = Header(None)):
+    _check_auth(authorization)
+    data = _load_job(job_id)
+    row = _find_row(data, body.row_id)
+    query = body.query.strip()
+    if len(query) < 2:
+        raise HTTPException(400, "Введите минимум 2 символа для поиска")
+
+    stock_path, base_stock = _load_cached_stock()
+    reviewed_decisions = load_reviewed_analog_decisions(DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH)
+    substitution_policy = load_substitution_policy()
+    matcher = StockMatcher(
+        clone_stock_items(base_stock),
+        reviewed_analog_decisions=reviewed_decisions,
+        substitution_policy=substitution_policy,
+    )
+    candidates = _manual_search_candidates(matcher, row, query, limit=body.limit)
+    results = [_serialize_candidate(candidate) for candidate in candidates]
+
+    return {
+        "job_id": job_id,
+        "row_id": body.row_id,
+        "query": query,
+        "stock_file": stock_path.name,
+        "results": results,
+    }
+
+
+class ManualSelectRequest(BaseModel):
+    row_id: str
+    candidate: dict[str, Any]
+
+
+@app.post("/api/jobs/{job_id}/select")
+def select_manual_candidate(job_id: str, body: ManualSelectRequest, authorization: str | None = Header(None)):
+    _check_auth(authorization)
+    data = _load_job(job_id)
+    row = _find_row(data, body.row_id)
+    candidate = body.candidate
+    code = str(candidate.get("code_1c") or "").strip()
+    name = str(candidate.get("name") or "").strip()
+    if not code or not name:
+        raise HTTPException(400, "Для выбора нужен code_1c и name")
+
+    approved = {
+        "code_1c": code,
+        "name": name,
+        "score": float(candidate.get("score") or 0.0),
+        "remaining": candidate.get("remaining"),
+        "price": candidate.get("price") or "",
+        "reasons": list(candidate.get("reasons") or []),
+    }
+    row["approved_analog"] = approved
+    row["status"] = "Одобрена замена"
+
+    analog_codes = {analog.get("code_1c") for analog in row.get("analogs", [])}
+    if approved["code_1c"] not in analog_codes:
+        row.setdefault("analogs", [])
+        row["analogs"].insert(0, approved)
+
+    status_counts = _rebuild_status_counts(data["rows"])
+    data["status_counts"] = status_counts
+    _save_job(job_id, data)
+    return {"row": row, "status_counts": status_counts}
 
 
 @app.post("/api/jobs/{job_id}/export")

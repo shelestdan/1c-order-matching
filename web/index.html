@@ -139,7 +139,19 @@
       <button class="modal-close" onclick="closeModal()">&times;</button>
     </div>
     <div class="modal-subtitle" id="modal-order-name"></div>
-    <div id="analog-list" class="analog-list"></div>
+    <div class="modal-search">
+      <input id="manual-search-input" type="text" placeholder="Поиск по остатку: код 1С, фрагмент названия, бренд, размер">
+      <button class="btn btn-primary" onclick="runManualSearch()">Найти</button>
+    </div>
+    <div class="modal-search-hint">Автоподбор остаётся консервативным. Здесь можно вручную найти любой товар из остатка по коду 1С или названию и выбрать его в файл для 1С.</div>
+    <div class="modal-section">
+      <div class="modal-section-title">Текущие аналоги</div>
+      <div id="analog-list" class="analog-list"></div>
+    </div>
+    <div class="modal-section">
+      <div class="modal-section-title">Результаты поиска по остатку</div>
+      <div id="search-results-list" class="analog-list"></div>
+    </div>
   </div>
 </div>
 
