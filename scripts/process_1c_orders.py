@@ -629,6 +629,7 @@ class StockItem:
     root_tokens: set[str]
     code_tokens: set[str]
     dimension_tags: set[str]
+    source_label: str = ""
 
 
 @dataclass
@@ -1957,7 +1958,7 @@ def ordered_subsequence_ratio(query: str, candidate: str) -> float:
     return 100.0 * matches / len(query_tokens)
 
 
-def load_stock(stock_path: Path) -> list[StockItem]:
+def load_stock(stock_path: Path, source_label: str = "") -> list[StockItem]:
     items: list[StockItem] = []
     for index, row in enumerate(iter_stock_rows(stock_path), start=1):
         quantity = parse_quantity(row.get("Остаток"))
@@ -2011,6 +2012,7 @@ def load_stock(stock_path: Path) -> list[StockItem]:
                     row.get("ТипПродукта"),
                 ),
                 dimension_tags=dimension_tags,
+                source_label=source_label,
             )
         )
     return items
@@ -2027,11 +2029,111 @@ def iter_stock_rows(stock_path: Path) -> Iterable[dict[str, object]]:
     raise ValueError(f"Unsupported stock format: {stock_path.suffix}")
 
 
+# Column name mappings: alternative CSV column names → internal names.
+# When multiple columns map to the same internal name, list preferred first.
+_CSV_COLUMN_MAP: dict[str, str] = {
+    "Код1с": "Код1с",
+    "код1с": "Код1с",
+    "Артикул": "Код1с",
+    "артикул": "Код1с",
+    "Номенклатура": "Номенклатура",
+    "номенклатура": "Номенклатура",
+    "Номенклатура, Характеристика": "Номенклатура",
+    "Остаток": "Остаток",
+    "остаток": "Остаток",
+    "Доступно": "Остаток",
+    "доступно": "Остаток",
+    "НаименованиДляПечати": "НаименованиДляПечати",
+    "ТипПродукта": "ТипПродукта",
+    "ПродажнаяЦена": "ПродажнаяЦена",
+    "СтопЦена": "СтопЦена",
+    "ПлановаяЦена": "ПлановаяЦена",
+    "Ед. изм.": "_unit",
+}
+# Preferred quantity columns in priority order (first found wins)
+_CSV_QUANTITY_PRIORITY = ("Доступно", "доступно", "Остаток", "остаток", "В наличии")
+
+
+def _detect_csv_params(stock_path: Path) -> tuple[str, str]:
+    """Detect encoding and delimiter for a CSV stock file."""
+    raw = stock_path.read_bytes()[:4096]
+    if raw[:3] == b"\xef\xbb\xbf":
+        encoding = "utf-8-sig"
+    else:
+        try:
+            raw.decode("utf-8")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            encoding = "cp1251"
+    text = raw.decode(encoding, errors="replace")
+    # Count delimiters in data lines (skip first few lines which may be metadata)
+    lines = text.split("\n")
+    tab_count = sum(line.count("\t") for line in lines[:20])
+    semi_count = sum(line.count(";") for line in lines[:20])
+    delimiter = "\t" if tab_count > semi_count else ";"
+    return encoding, delimiter
+
+
+def _find_csv_header_row(lines: list[str]) -> int:
+    """Find the row containing column headers by looking for known column names."""
+    known_headers = {"Номенклатура", "Артикул", "Код1с", "Остаток", "Доступно",
+                     "Номенклатура, Характеристика", "В наличии"}
+    for i, line in enumerate(lines[:30]):
+        cells = [c.strip() for c in line.split("\t")] if "\t" in line else [c.strip() for c in line.split(";")]
+        if sum(1 for c in cells if c in known_headers) >= 2:
+            return i
+    return 0  # fallback to first line
+
+
 def iter_stock_rows_from_csv(stock_path: Path) -> Iterable[dict[str, object]]:
-    with stock_path.open("r", encoding="cp1251", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter=";")
-        for row in reader:
-            yield dict(row)
+    encoding, delimiter = _detect_csv_params(stock_path)
+    with stock_path.open("r", encoding=encoding, newline="") as handle:
+        all_lines = handle.readlines()
+
+    header_index = _find_csv_header_row(all_lines)
+    header_line = all_lines[header_index].strip()
+    raw_headers = [h.strip() for h in header_line.split(delimiter)]
+
+    # Map columns to internal names — keep first occurrence of each internal name
+    column_map: dict[int, str] = {}
+    used_internal: set[str] = set()
+    # First pass: find the best quantity column by priority
+    quantity_col: int | None = None
+    for preferred in _CSV_QUANTITY_PRIORITY:
+        for col_index, raw_header in enumerate(raw_headers):
+            if raw_header == preferred:
+                quantity_col = col_index
+                break
+        if quantity_col is not None:
+            break
+    if quantity_col is not None:
+        column_map[quantity_col] = "Остаток"
+        used_internal.add("Остаток")
+    # Second pass: map remaining columns
+    for col_index, raw_header in enumerate(raw_headers):
+        internal = _CSV_COLUMN_MAP.get(raw_header)
+        if internal and internal not in used_internal:
+            column_map[col_index] = internal
+            used_internal.add(internal)
+
+    for line in all_lines[header_index + 1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        cells = stripped.split(delimiter)
+        # Skip section header rows (e.g. warehouse names with no data columns)
+        if len(cells) < 3:
+            continue
+        # Skip rows where the first column is empty (sub-totals, etc.)
+        if not cells[0].strip():
+            continue
+        row: dict[str, object] = {}
+        for col_index, internal_name in column_map.items():
+            value = cells[col_index].strip() if col_index < len(cells) else ""
+            row[internal_name] = value
+        # Only yield rows that have at least a name
+        if row.get("Номенклатура"):
+            yield row
 
 
 def iter_stock_rows_from_workbook(stock_path: Path) -> Iterable[dict[str, object]]:

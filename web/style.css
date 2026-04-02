@@ -558,6 +558,28 @@ tr.row-notfound td:first-child { border-left: 3px solid var(--notfound); }
 .history-date { font-size: 13px; color: var(--text-muted); }
 .history-stats { display: flex; gap: 12px; font-size: 13px; }
 
+/* ===== Depleted status ===== */
+:root {
+  --depleted: #9ca3af;
+  --depleted-bg: #f3f4f6;
+}
+tr.row-depleted td:first-child { border-left: 3px solid var(--depleted); }
+.badge-depleted { background: var(--depleted-bg); color: var(--depleted); }
+
+/* ===== Warehouse label badge ===== */
+.warehouse-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  background: #dbeafe;
+  color: #1e40af;
+  vertical-align: middle;
+  margin-left: 4px;
+  white-space: nowrap;
+}
+
 /* ===== Responsive ===== */
 @media (max-width: 768px) {
   .stats-bar { flex-direction: column; }

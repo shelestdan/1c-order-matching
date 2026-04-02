@@ -259,22 +259,30 @@ const APPROVAL_STATUSES = new Set([
   'Безопасный аналог',
 ]);
 
+function warehouseBadge(label) {
+  if (!label) return '';
+  return `<span class="warehouse-badge">${esc(label)}</span>`;
+}
+
 function buildMatchCell(row) {
   if (row.approved_analog) {
     const a = row.approved_analog;
-    return `<div class="match-name">${esc(a.name)}</div>
+    return `<div class="match-name">${esc(a.name)} ${warehouseBadge(a.source_label)}</div>
             <div class="match-code">${esc(a.code_1c)}</div>
             <div class="match-comment" style="color:var(--approved)">Одобрено менеджером</div>`;
   }
   if (row.matched_name) {
-    return `<div class="match-name">${esc(row.matched_name)}</div>
+    const depletedNote = row.status === 'Найдено, но остаток уже распределен'
+      ? `<div class="match-comment" style="color:var(--approval)">Остаток исчерпан</div>` : '';
+    return `<div class="match-name">${esc(row.matched_name)} ${warehouseBadge(row.matched_source_label)}</div>
             <div class="match-code">${esc(row.matched_code || '')}</div>
-            ${row.comment ? `<div class="match-comment">${esc(row.comment)}</div>` : ''}`;
+            ${row.comment ? `<div class="match-comment">${esc(row.comment)}</div>` : ''}
+            ${depletedNote}`;
   }
   if (APPROVAL_STATUSES.has(row.status) && row.analogs && row.analogs.length) {
     const a = row.analogs[0];
     const zeroStock = a.remaining === 0 || a.remaining === '0';
-    return `<div class="match-name">${esc(a.name)}</div>
+    return `<div class="match-name">${esc(a.name)} ${warehouseBadge(a.source_label)}</div>
             <div class="match-code">${esc(a.code_1c)}</div>
             <div class="match-comment">${zeroStock ? '<span style="color:var(--notfound)">Нет в наличии · </span>' : ''}Лучший аналог (score ${a.score})</div>`;
   }
@@ -398,7 +406,7 @@ function renderCandidateList(containerId, candidates, rowId, source) {
     card.className = 'analog-card';
     card.innerHTML = `
       <div class="analog-info">
-        <div class="analog-name">${esc(candidate.name)}</div>
+        <div class="analog-name">${esc(candidate.name)} ${warehouseBadge(candidate.source_label)}</div>
         <div class="analog-code">${esc(candidate.code_1c)}</div>
         <div class="analog-meta">
           ${candidate.score != null ? `<span>Score: <strong>${candidate.score}</strong></span>` : ''}

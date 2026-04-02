@@ -76,17 +76,20 @@ MANUAL_SEARCH_MIN_OVERLAP = 0.12
 MANUAL_SEARCH_MIN_SOFT_OVERLAP = 0.18
 MANUAL_SEARCH_MIN_DIMENSION_BONUS = 6.0
 
+STOCK_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls"}
+STOCK_LABELS_FILE = "stock_labels.json"
+
+# Combined stock cache — keyed by fingerprint of all stock files + their mtimes
 _stock_cache: dict[str, Any] = {
-    "path": None,
-    "mtime": None,
+    "fingerprint": None,
     "base_stock": None,
+    "stock_paths": [],
 }
 
 # Master StockMatcher (read-only indexes) — forked per job so index building
 # happens only once per stock file version, not once per job.
 _matcher_cache: dict[str, Any] = {
-    "path": None,
-    "mtime": None,
+    "fingerprint": None,
     "master_matcher": None,
 }
 
@@ -147,31 +150,59 @@ def login(body: LoginRequest):
 # ---------------------------------------------------------------------------
 
 
-def _find_stock_file() -> Path:
-    """Find the most recent stock file in inputs/stock/."""
+def _find_all_stock_files() -> list[tuple[Path, str]]:
+    """Find all stock files in inputs/stock/ and their warehouse labels.
+
+    Returns list of (path, label) tuples. Labels are loaded from
+    stock_labels.json in the stock directory. Files without explicit
+    labels get an empty string.
+    """
+    labels_path = STOCK_DIR / STOCK_LABELS_FILE
+    labels: dict[str, str] = {}
+    if labels_path.exists():
+        try:
+            labels = json.loads(labels_path.read_text("utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
     candidates = sorted(STOCK_DIR.glob("*.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    result: list[tuple[Path, str]] = []
     for c in candidates:
-        if c.suffix.lower() in (".csv", ".xlsx", ".xlsm", ".xls"):
-            return c
-    raise HTTPException(500, "No stock file found in inputs/stock/")
+        if c.suffix.lower() in STOCK_EXTENSIONS and c.name != STOCK_LABELS_FILE:
+            label = labels.get(c.name, "")
+            result.append((c, label))
+    if not result:
+        raise HTTPException(500, "No stock file found in inputs/stock/")
+    return result
 
 
-def _load_cached_stock() -> tuple[Path, list[Any]]:
-    stock_path = _find_stock_file()
-    mtime = stock_path.stat().st_mtime
-    if (
-        _stock_cache["path"] == str(stock_path)
-        and _stock_cache["mtime"] == mtime
-        and _stock_cache["base_stock"] is not None
-    ):
-        return stock_path, _stock_cache["base_stock"]
-    base_stock = load_stock(stock_path)
-    _stock_cache["path"] = str(stock_path)
-    _stock_cache["mtime"] = mtime
-    _stock_cache["base_stock"] = base_stock
+def _stock_fingerprint(stock_files: list[tuple[Path, str]]) -> str:
+    """Build a fingerprint from all stock file paths + mtimes."""
+    parts = []
+    for path, label in stock_files:
+        parts.append(f"{path.name}:{path.stat().st_mtime}:{label}")
+    return "|".join(sorted(parts))
+
+
+def _load_cached_stock() -> tuple[list[Path], list[Any]]:
+    stock_files = _find_all_stock_files()
+    fp = _stock_fingerprint(stock_files)
+    if _stock_cache["fingerprint"] == fp and _stock_cache["base_stock"] is not None:
+        return _stock_cache["stock_paths"], _stock_cache["base_stock"]
+
+    all_items: list[Any] = []
+    paths: list[Path] = []
+    for path, label in stock_files:
+        items = load_stock(path, source_label=label)
+        all_items.extend(items)
+        paths.append(path)
+
+    _stock_cache["fingerprint"] = fp
+    _stock_cache["base_stock"] = all_items
+    _stock_cache["stock_paths"] = paths
     # Invalidate matcher cache when stock changes
     _matcher_cache["master_matcher"] = None
-    return stock_path, base_stock
+    return paths, all_items
 
 
 def _load_cached_matcher() -> "StockMatcher":
@@ -180,15 +211,12 @@ def _load_cached_matcher() -> "StockMatcher":
     Callers must call .fork() on the result to get a job-local copy with
     independent remaining-quantity tracking.
     """
-    stock_path, base_stock = _load_cached_stock()
-    mtime = stock_path.stat().st_mtime
-    if (
-        _matcher_cache["path"] == str(stock_path)
-        and _matcher_cache["mtime"] == mtime
-        and _matcher_cache["master_matcher"] is not None
-    ):
+    stock_files = _find_all_stock_files()
+    fp = _stock_fingerprint(stock_files)
+    if _matcher_cache["fingerprint"] == fp and _matcher_cache["master_matcher"] is not None:
         return _matcher_cache["master_matcher"]
 
+    _, base_stock = _load_cached_stock()
     reviewed_decisions = load_reviewed_analog_decisions(DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH)
     substitution_policy = load_substitution_policy()
     stock_items = clone_stock_items(base_stock)
@@ -197,8 +225,7 @@ def _load_cached_matcher() -> "StockMatcher":
         reviewed_analog_decisions=reviewed_decisions,
         substitution_policy=substitution_policy,
     )
-    _matcher_cache["path"] = str(stock_path)
-    _matcher_cache["mtime"] = mtime
+    _matcher_cache["fingerprint"] = fp
     _matcher_cache["master_matcher"] = master
     return master
 
@@ -212,7 +239,7 @@ def _rebuild_status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _serialize_candidate(analog) -> dict[str, Any]:
-    return {
+    result = {
         "code_1c": analog.stock.code_1c,
         "name": analog.stock.name,
         "score": round(analog.score, 1),
@@ -220,6 +247,9 @@ def _serialize_candidate(analog) -> dict[str, Any]:
         "price": analog.stock.sale_price,
         "reasons": analog.reasons,
     }
+    if analog.stock.source_label:
+        result["source_label"] = analog.stock.source_label
+    return result
 
 
 def _build_manual_search_order(row: dict[str, Any], query: str) -> OrderLine:
@@ -365,17 +395,17 @@ def _run_pipeline(upload_path: Path, job_dir: Path) -> dict[str, Any]:
     normalized_path, parsed_count, issue_count = normalize_request_file(upload_path, normalized_dir)
 
     # Stage 2: match — fork the cached master matcher (indexes are pre-built)
-    stock_path, _ = _load_cached_stock()
+    stock_paths, _ = _load_cached_stock()
     matcher = _load_cached_matcher().fork()
     order_lines = load_order_lines(normalized_path)
     order_results = match_orders(order_lines, matcher)
 
     output_paths = write_outputs(
         order_path=normalized_path,
-        stock_path=stock_path,
-        reviewed_decisions_path=DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH if reviewed_decisions else None,
+        stock_path=stock_paths[0],
+        reviewed_decisions_path=DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH,
         order_results=order_results,
-        stock_items=stock_items,
+        stock_items=matcher.stock_items,
         out_dir=matched_dir,
     )
 
@@ -403,6 +433,7 @@ def _run_pipeline(upload_path: Path, job_dir: Path) -> dict[str, Any]:
             "matched_code": result.matched_stock.code_1c if result.matched_stock else None,
             "matched_name": result.matched_stock.name if result.matched_stock else None,
             "matched_price": result.matched_stock.sale_price if result.matched_stock else None,
+            "matched_source_label": result.matched_stock.source_label if result.matched_stock and result.matched_stock.source_label else None,
             "available_qty": result.available_qty,
             "analogs": analogs_list,
             "approved_analog": None,  # will be set by manager
@@ -419,7 +450,7 @@ def _run_pipeline(upload_path: Path, job_dir: Path) -> dict[str, Any]:
         "total_rows": len(rows),
         "status_counts": status_counts,
         "rows": rows,
-        "stock_file": stock_path.name,
+        "stock_files": [p.name for p in stock_paths],
         "parsed_count": parsed_count,
         "issue_count": issue_count,
         "output_files": [str(p) for p in output_paths],
@@ -557,7 +588,6 @@ def search_stock_for_row(job_id: str, body: ManualSearchRequest, authorization: 
     if len(query) < 2:
         raise HTTPException(400, "Введите минимум 2 символа для поиска")
 
-    stock_path, _ = _load_cached_stock()
     matcher = _load_cached_matcher().fork()
     candidates = _manual_search_candidates(matcher, row, query, limit=body.limit)
     results = [_serialize_candidate(candidate) for candidate in candidates]
@@ -566,7 +596,6 @@ def search_stock_for_row(job_id: str, body: ManualSearchRequest, authorization: 
         "job_id": job_id,
         "row_id": body.row_id,
         "query": query,
-        "stock_file": stock_path.name,
         "results": results,
     }
 
@@ -595,6 +624,8 @@ def select_manual_candidate(job_id: str, body: ManualSelectRequest, authorizatio
         "price": candidate.get("price") or "",
         "reasons": list(candidate.get("reasons") or []),
     }
+    if candidate.get("source_label"):
+        approved["source_label"] = candidate["source_label"]
     row["approved_analog"] = approved
     row["status"] = "Одобрена замена"
 
