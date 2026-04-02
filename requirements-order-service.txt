@@ -7,6 +7,7 @@ unstructured[all-docs]>=0.15
 camelot-py[cv]>=0.11
 pdfplumber>=0.11
 paddleocr>=2.8
+Pillow>=10.4
 fastapi>=0.115
 uvicorn[standard]>=0.30
 pydantic>=2.8

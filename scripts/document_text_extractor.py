@@ -5,11 +5,27 @@ import json
 import os
 import platform
 import shutil
+import statistics
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
+
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - optional dependency
+    np = None
+
+try:
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+except ImportError:  # pragma: no cover - optional dependency
+    Image = ImageEnhance = ImageFilter = ImageOps = None
+
+try:
+    from paddleocr import PaddleOCR
+except ImportError:  # pragma: no cover - optional dependency
+    PaddleOCR = None
 
 
 @dataclass
@@ -35,6 +51,10 @@ class ExtractionResult:
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SWIFT_EXTRACTOR_PATH = PROJECT_ROOT / "scripts" / "extract_document_text.swift"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".gif"}
+SWIFT_VISION_ENABLED = os.environ.get("ENABLE_SWIFT_VISION", "").strip().lower() in {"1", "true", "yes"}
+
+_PADDLE_OCR_INSTANCE: object | None = None
+_PADDLE_OCR_ERROR: str | None = None
 
 
 def split_text_to_lines(text: str, *, page: int, source: str, confidence: float) -> list[ExtractionLine]:
@@ -64,11 +84,17 @@ def detect_available_extractors() -> dict[str, object]:
     return {
         "platform": platform.system().lower(),
         "tools": {
+            "paddleocr": is_paddleocr_available(),
             "pdftotext": is_tool_available("pdftotext"),
             "pdftoppm": is_tool_available("pdftoppm"),
             "tesseract": is_tool_available("tesseract"),
             "ocrmypdf": is_tool_available("ocrmypdf"),
-            "swift_vision": platform.system().lower() == "darwin" and SWIFT_EXTRACTOR_PATH.exists(),
+            "swift_vision": (
+                SWIFT_VISION_ENABLED
+                and platform.system().lower() == "darwin"
+                and SWIFT_EXTRACTOR_PATH.exists()
+                and is_tool_available("swift")
+            ),
         },
         "recommended_linux_packages": [
             "poppler-utils",
@@ -77,6 +103,267 @@ def detect_available_extractors() -> dict[str, object]:
             "ocrmypdf",
         ],
     }
+
+
+def is_paddleocr_available() -> bool:
+    return PaddleOCR is not None and Image is not None and np is not None
+
+
+def get_paddle_ocr() -> object | None:
+    global _PADDLE_OCR_INSTANCE, _PADDLE_OCR_ERROR
+    if _PADDLE_OCR_INSTANCE is not None:
+        return _PADDLE_OCR_INSTANCE
+    if _PADDLE_OCR_ERROR is not None or not is_paddleocr_available():
+        return None
+    try:
+        _PADDLE_OCR_INSTANCE = PaddleOCR(
+            use_angle_cls=True,
+            lang="ru",
+            show_log=False,
+        )
+    except Exception as exc:  # pragma: no cover - depends on optional runtime
+        _PADDLE_OCR_ERROR = str(exc)
+        return None
+    return _PADDLE_OCR_INSTANCE
+
+
+def _row_has_quantity_hint(row: dict[str, object]) -> bool:
+    row_text = str(row["text"]).lower()
+    return any(token.isdigit() for token in row_text.replace(",", " ").replace(".", " ").split()) or bool(
+        any(fragment.get("has_digits") for fragment in row["fragments"])
+    )
+
+
+def _ocr_result_to_boxes(raw_result: object) -> list[dict[str, object]]:
+    if not raw_result:
+        return []
+    lines = raw_result
+    if isinstance(raw_result, list) and raw_result and isinstance(raw_result[0], list):
+        first = raw_result[0]
+        if first and isinstance(first[0], (list, tuple)) and len(first[0]) == 2:
+            lines = first
+    boxes: list[dict[str, object]] = []
+    for line in lines or []:
+        if not isinstance(line, (list, tuple)) or len(line) != 2:
+            continue
+        box, meta = line
+        if not isinstance(meta, (list, tuple)) or len(meta) < 2:
+            continue
+        text = str(meta[0]).strip()
+        confidence = float(meta[1] or 0.0)
+        if not text:
+            continue
+        xs = [float(point[0]) for point in box]
+        ys = [float(point[1]) for point in box]
+        left = min(xs)
+        right = max(xs)
+        top = min(ys)
+        bottom = max(ys)
+        boxes.append(
+            {
+                "text": text,
+                "confidence": confidence,
+                "left": left,
+                "right": right,
+                "top": top,
+                "bottom": bottom,
+                "height": max(bottom - top, 1.0),
+                "center_y": (top + bottom) / 2.0,
+                "has_digits": any(char.isdigit() for char in text),
+            }
+        )
+    return boxes
+
+
+def _merge_row_rows(primary: dict[str, object], secondary: dict[str, object]) -> dict[str, object]:
+    fragments = list(primary["fragments"]) + list(secondary["fragments"])
+    fragments.sort(key=lambda item: float(item["left"]))
+    text = " | ".join(str(item["text"]).strip() for item in fragments if str(item["text"]).strip())
+    confidence = statistics.fmean(float(item["confidence"]) for item in fragments) if fragments else 0.0
+    top = min(float(item["top"]) for item in fragments)
+    bottom = max(float(item["bottom"]) for item in fragments)
+    return {
+        "text": text,
+        "confidence": confidence,
+        "fragments": fragments,
+        "center_y": (top + bottom) / 2.0,
+        "top": top,
+        "bottom": bottom,
+    }
+
+
+def _group_boxes_into_rows(boxes: list[dict[str, object]]) -> list[dict[str, object]]:
+    if not boxes:
+        return []
+    median_height = statistics.median(float(item["height"]) for item in boxes)
+    base_tolerance = max(12.0, median_height * 1.55)
+    rows: list[dict[str, object]] = []
+    for box in sorted(boxes, key=lambda item: (float(item["center_y"]), float(item["left"]))):
+        best_index: int | None = None
+        best_gap = float("inf")
+        for index, row in enumerate(rows):
+            row_center = float(row["center_y"])
+            row_top = float(row["top"])
+            row_bottom = float(row["bottom"])
+            vertical_gap = abs(float(box["center_y"]) - row_center)
+            overlap = min(float(box["bottom"]), row_bottom) - max(float(box["top"]), row_top)
+            tolerance = max(base_tolerance, (row_bottom - row_top) * 1.25)
+            if vertical_gap <= tolerance or overlap >= min(float(box["height"]), row_bottom - row_top) * 0.25:
+                if vertical_gap < best_gap:
+                    best_gap = vertical_gap
+                    best_index = index
+        if best_index is None:
+            rows.append(
+                {
+                    "fragments": [box],
+                    "center_y": float(box["center_y"]),
+                    "top": float(box["top"]),
+                    "bottom": float(box["bottom"]),
+                }
+            )
+            continue
+        row = rows[best_index]
+        row["fragments"].append(box)
+        row["fragments"].sort(key=lambda item: float(item["left"]))
+        row["top"] = min(float(row["top"]), float(box["top"]))
+        row["bottom"] = max(float(row["bottom"]), float(box["bottom"]))
+        row["center_y"] = (float(row["top"]) + float(row["bottom"])) / 2.0
+
+    enriched_rows = [
+        {
+            "text": " | ".join(str(fragment["text"]).strip() for fragment in row["fragments"] if str(fragment["text"]).strip()),
+            "confidence": statistics.fmean(float(fragment["confidence"]) for fragment in row["fragments"]),
+            "fragments": row["fragments"],
+            "center_y": float(row["center_y"]),
+            "top": float(row["top"]),
+            "bottom": float(row["bottom"]),
+        }
+        for row in rows
+    ]
+    enriched_rows.sort(key=lambda item: float(item["center_y"]))
+
+    merged_rows: list[dict[str, object]] = []
+    for row in enriched_rows:
+        if not merged_rows:
+            merged_rows.append(row)
+            continue
+        previous = merged_rows[-1]
+        vertical_gap = float(row["top"]) - float(previous["bottom"])
+        is_sparse_continuation = (
+            len(row["fragments"]) <= 2
+            and not _row_has_quantity_hint(row)
+            and vertical_gap <= base_tolerance * 0.8
+        )
+        if is_sparse_continuation:
+            merged_rows[-1] = _merge_row_rows(previous, row)
+            continue
+        merged_rows.append(row)
+    return merged_rows
+
+
+def _score_ocr_rows(rows: list[dict[str, object]]) -> float:
+    if not rows:
+        return 0.0
+    char_count = sum(len(str(row["text"])) for row in rows)
+    delimiter_count = sum(str(row["text"]).count("|") for row in rows)
+    avg_confidence = statistics.fmean(float(row["confidence"]) for row in rows)
+    return char_count + delimiter_count * 18.0 + avg_confidence * 40.0 + len(rows) * 6.0
+
+
+def _iter_paddle_image_variants(path: Path) -> list[tuple[str, object]]:
+    if Image is None or np is None:
+        return []
+    with Image.open(path) as loaded:
+        base = ImageOps.exif_transpose(loaded).convert("RGB")
+        longest_edge = max(base.size) if base.size else 0
+        if longest_edge and longest_edge < 1800:
+            scale = min(2.4, 1800 / float(longest_edge))
+            resized = (
+                max(1, int(round(base.size[0] * scale))),
+                max(1, int(round(base.size[1] * scale))),
+            )
+            base = base.resize(resized, Image.Resampling.LANCZOS)
+        grayscale = ImageOps.grayscale(base)
+        contrast = ImageEnhance.Contrast(grayscale).enhance(1.9)
+        sharpened = contrast.filter(ImageFilter.SHARPEN)
+        threshold = contrast.point(lambda value: 255 if value >= 165 else 0)
+        return [
+            ("paddleocr_rgb", np.asarray(base)),
+            ("paddleocr_gray", np.asarray(grayscale)),
+            ("paddleocr_contrast", np.asarray(sharpened)),
+            ("paddleocr_threshold", np.asarray(threshold)),
+        ]
+
+
+def extract_image_via_paddleocr(path: Path, *, page: int = 1) -> ExtractionResult | None:
+    ocr = get_paddle_ocr()
+    if ocr is None:
+        if _PADDLE_OCR_ERROR:
+            return ExtractionResult(
+                file=str(path),
+                kind="image",
+                extraction_mode="paddleocr_failed",
+                page_count=1,
+                text="",
+                warnings=[_PADDLE_OCR_ERROR],
+            )
+        return None
+
+    variants = _iter_paddle_image_variants(path)
+    if not variants:
+        return None
+
+    warnings: list[str] = []
+    best_rows: list[dict[str, object]] = []
+    best_mode = "paddleocr"
+    best_score = -1.0
+    best_confidence = 0.0
+
+    for mode_name, image_data in variants:
+        try:
+            raw_result = ocr.ocr(image_data, cls=True)
+        except Exception as exc:  # pragma: no cover - optional runtime failure
+            warnings.append(f"{mode_name}: {exc}")
+            continue
+        boxes = _ocr_result_to_boxes(raw_result)
+        rows = _group_boxes_into_rows(boxes)
+        score = _score_ocr_rows(rows)
+        if rows and score > best_score:
+            best_rows = rows
+            best_mode = mode_name
+            best_score = score
+            best_confidence = statistics.fmean(float(row["confidence"]) for row in rows)
+
+    if not best_rows:
+        return ExtractionResult(
+            file=str(path),
+            kind="image",
+            extraction_mode="paddleocr_failed",
+            page_count=1,
+            text="",
+            warnings=warnings or ["PaddleOCR не распознал текст на изображении"],
+        )
+
+    lines = [
+        ExtractionLine(
+            page=page,
+            index=index,
+            text=str(row["text"]),
+            confidence=float(row["confidence"]),
+            source="paddleocr",
+        )
+        for index, row in enumerate(best_rows, start=1)
+        if str(row["text"]).strip()
+    ]
+    return ExtractionResult(
+        file=str(path),
+        kind="image",
+        extraction_mode=best_mode,
+        page_count=1,
+        text="\n".join(line.text for line in lines),
+        lines=lines,
+        warnings=warnings + ([f"avg_confidence={best_confidence:.2f}"] if best_confidence else []),
+    )
 
 
 def extract_pdf_via_pdftotext(path: Path) -> ExtractionResult | None:
@@ -203,7 +490,12 @@ def extract_pdf_via_poppler_tesseract(path: Path) -> ExtractionResult | None:
 
 
 def extract_via_swift_vision(path: Path) -> ExtractionResult | None:
-    if platform.system().lower() != "darwin" or not SWIFT_EXTRACTOR_PATH.exists():
+    if (
+        not SWIFT_VISION_ENABLED
+        or platform.system().lower() != "darwin"
+        or not SWIFT_EXTRACTOR_PATH.exists()
+        or not is_tool_available("swift")
+    ):
         return None
     module_cache = PROJECT_ROOT / ".swift-module-cache"
     module_cache.mkdir(parents=True, exist_ok=True)
@@ -286,6 +578,7 @@ def extract_document_text(path: Path) -> ExtractionResult:
         return merge_attempts(
             path,
             (
+                extract_image_via_paddleocr(path),
                 extract_image_via_tesseract(path),
                 extract_via_swift_vision(path),
             ),

@@ -259,10 +259,12 @@ def read_docx_text(path: Path) -> str:
 
 def looks_like_header(line: str) -> bool:
     lowered = line.lower()
+    has_name = "наимен" in lowered or "материал" in lowered
+    has_qty = "колич" in lowered or "кол-во" in lowered or "кол во" in lowered or "qty" in lowered
+    has_position = "позиц" in lowered
     return (
-        "наимен" in lowered
-        and ("колич" in lowered or "qty" in lowered)
-        or ("позиц" in lowered and "наимен" in lowered)
+        has_name and has_qty
+        or (has_position and has_name)
     )
 
 
@@ -352,6 +354,10 @@ def extract_qty_from_text(text: str) -> tuple[str, float, str, float] | None:
             re.IGNORECASE,
         ),
         re.compile(
+            rf"^(?P<body>.+?)\s+(?P<unit>{UNIT_PATTERN})\s*[:.]?\s*(?P<qty>\d+(?:[.,]\d+)?)\s*$",
+            re.IGNORECASE,
+        ),
+        re.compile(
             rf"^(?P<body>.+?)\s*(?:[-–—,:;]\s*)?(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{UNIT_PATTERN})\s*$",
             re.IGNORECASE,
         ),
@@ -361,7 +367,7 @@ def extract_qty_from_text(text: str) -> tuple[str, float, str, float] | None:
             re.IGNORECASE,
         ),
     ]
-    scores = (0.95, 0.92, 0.84, 0.8)
+    scores = (0.95, 0.93, 0.92, 0.84, 0.8)
     for pattern, confidence in zip(patterns, scores):
         match = pattern.match(text.strip())
         if not match:
@@ -666,6 +672,16 @@ def normalize_document_request(path: Path) -> tuple[list[ParsedClientLine], list
                 parsed, parse_issues = parse_delimited_text(text, path.name, path.stem, delimiter)
                 if parsed:
                     break
+        freeform_text = text
+        for delimiter in DELIMITERS:
+            freeform_text = freeform_text.replace(delimiter, " ")
+        freeform_parsed, freeform_issues = parse_freeform_text(freeform_text, path.name, path.stem)
+        normalized_first_line = non_empty_lines[0]
+        for delimiter in DELIMITERS:
+            normalized_first_line = normalized_first_line.replace(delimiter, " ")
+        header_like_first_line = looks_like_header(normalized_first_line)
+        if len(parsed) == 0 or (not header_like_first_line and len(freeform_parsed) > len(parsed)):
+            parsed, parse_issues = freeform_parsed, freeform_issues
     else:
         parsed, parse_issues = parse_freeform_text(text, path.name, path.stem)
 
