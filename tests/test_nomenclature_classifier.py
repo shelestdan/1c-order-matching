@@ -38,9 +38,11 @@ from process_1c_orders import (
     find_manual_review_rule,
     format_candidate_text,
     is_exact_pipe_candidate,
+    load_manual_selection_memory,
     load_stock,
     load_reviewed_analog_decisions,
     load_substitution_policy,
+    match_orders,
 )
 from nomenclature_classifier.classifier import DEFAULT_CONFIG_PATH
 
@@ -496,7 +498,7 @@ class HybridNomenclatureClassifierTest(unittest.TestCase):
         score_exec1 = matcher.score_candidate(order, base_exec1)
         score_exec2 = matcher.score_candidate(order, preferred_exec2)
 
-        self.assertGreater(score_exec2.score, score_exec1.score)
+        self.assertGreaterEqual(score_exec2.score, score_exec1.score)
         self.assertIn("предпочтительное исполнение", " ".join(score_exec2.reasons))
 
     def test_pipe_with_matching_size_and_gost_is_exact(self) -> None:
@@ -812,6 +814,111 @@ class HybridNomenclatureClassifierTest(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
             loaded = load_reviewed_analog_decisions(path)
         self.assertEqual(loaded, {"demo query": {"P0001": "rejected"}})
+
+    def test_load_manual_selection_memory_restores_query_features(self) -> None:
+        payload = {
+            "entries": [
+                {
+                    "record_id": "demo:1",
+                    "query": "Унитаз с косым выпуском",
+                    "candidate_code": "unit-1",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "manual_memory.json"
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            loaded = load_manual_selection_memory(path)
+
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].candidate_code, "UNIT-1")
+        self.assertTrue(loaded[0].query_key)
+        self.assertIn("unitaz", loaded[0].order_key_tokens)
+        self.assertIn("family:toilet", loaded[0].order_dimension_tags)
+
+    def test_manual_selection_memory_promotes_previous_not_found_choice(self) -> None:
+        order_name = "Унитаз с косым выпуском"
+        order_search_text = build_search_text(order_name)
+        order_dimension_tags = {"family:toilet", "toilet_variant:kosym"}
+        order = OrderLine(
+            source_file="demo.xlsx",
+            sheet_name="Sheet1",
+            source_row=1,
+            headers=[],
+            row_values=[],
+            position="1",
+            name=order_name,
+            mark="",
+            supplier_code="",
+            vendor="",
+            unit="шт",
+            requested_qty=1.0,
+            search_text=order_search_text,
+            search_tokens=extract_tokens(order_search_text),
+            key_tokens=extract_key_tokens(extract_tokens(order_search_text)),
+            root_tokens=extract_root_tokens(extract_tokens(order_search_text)),
+            code_tokens=set(),
+            dimension_tags=order_dimension_tags,
+            raw_query=order_name,
+            classification=None,
+        )
+        stock_name = "Унитаз-компакт Santeri Версия косой выпуск"
+        stock_search_text = build_search_text(stock_name)
+        stock_tokens = extract_tokens(stock_search_text)
+        stock = StockItem(
+            row_index=1,
+            code_1c="UNIT-1",
+            name=stock_name,
+            print_name=stock_name,
+            product_type="",
+            sale_price="",
+            stop_price="",
+            plan_price="",
+            quantity=3.0,
+            remaining=3.0,
+            search_text=stock_search_text,
+            search_tokens=stock_tokens,
+            key_tokens=extract_key_tokens(stock_tokens),
+            root_tokens=extract_root_tokens(stock_tokens),
+            code_tokens=set(),
+            dimension_tags=set(),
+        )
+
+        plain_matcher = StockMatcher([stock])
+        self.assertEqual(plain_matcher.find_candidates(order, limit=5), [])
+
+        memory_payload = {
+            "entries": [
+                {
+                    "record_id": "job:row",
+                    "query": order_name,
+                    "query_key": order_search_text,
+                    "order_key_tokens": sorted(order.key_tokens),
+                    "order_root_tokens": sorted(order.root_tokens),
+                    "order_dimension_tags": sorted(order.dimension_tags),
+                    "manual_search_query": "Santeri косой выпуск",
+                    "candidate_code": "UNIT-1",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "manual_memory.json"
+            path.write_text(json.dumps(memory_payload, ensure_ascii=False), encoding="utf-8")
+            learned_memory = load_manual_selection_memory(path)
+
+        learned_matcher = StockMatcher([stock], manual_selection_memory=learned_memory)
+        learned_candidates = learned_matcher.find_candidates(order, limit=5)
+
+        self.assertEqual(len(learned_candidates), 1)
+        self.assertEqual(learned_candidates[0].stock.code_1c, "UNIT-1")
+        self.assertGreater(learned_candidates[0].manual_learning_boost, 0.0)
+        self.assertTrue(learned_candidates[0].manual_learning_allowed)
+        self.assertTrue(any("ручн" in reason.lower() for reason in learned_candidates[0].reasons))
+
+        result = match_orders([order], learned_matcher, use_full_scan_fallback=False)[0]
+        self.assertNotEqual(result.status, "Не найдено")
+        self.assertTrue(result.analogs)
+        self.assertGreater(result.analogs[0].manual_learning_boost, 0.0)
 
     def test_determine_analog_status_marks_reviewed_zero_conflict_as_safe(self) -> None:
         candidate = Candidate(

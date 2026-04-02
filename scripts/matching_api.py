@@ -33,8 +33,10 @@ from pydantic import BaseModel
 from normalize_client_requests import ensure_output_dir, normalize_request_file
 from process_1c_orders import (
     Candidate,
+    DEFAULT_MANUAL_SELECTION_MEMORY_PATH,
     DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH,
     OrderLine,
+    STATUS_NOT_FOUND,
     StockMatcher,
     augment_search_text_with_dimension_tags,
     build_search_text,
@@ -48,6 +50,7 @@ from process_1c_orders import (
     extract_root_tokens,
     extract_tokens,
     load_order_lines,
+    load_manual_selection_memory,
     load_reviewed_analog_decisions,
     load_stock,
     load_substitution_policy,
@@ -184,6 +187,20 @@ def _stock_fingerprint(stock_files: list[tuple[Path, str]]) -> str:
     return "|".join(sorted(parts))
 
 
+def _manual_selection_memory_path() -> Path:
+    configured = os.environ.get("MANUAL_SELECTION_MEMORY_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return DEFAULT_MANUAL_SELECTION_MEMORY_PATH
+
+
+def _path_fingerprint(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    stat = path.stat()
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
 def _load_cached_stock() -> tuple[list[Path], list[Any]]:
     stock_files = _find_all_stock_files()
     fp = _stock_fingerprint(stock_files)
@@ -212,17 +229,20 @@ def _load_cached_matcher() -> "StockMatcher":
     independent remaining-quantity tracking.
     """
     stock_files = _find_all_stock_files()
-    fp = _stock_fingerprint(stock_files)
+    manual_memory_path = _manual_selection_memory_path()
+    fp = f"{_stock_fingerprint(stock_files)}|manual:{_path_fingerprint(manual_memory_path)}"
     if _matcher_cache["fingerprint"] == fp and _matcher_cache["master_matcher"] is not None:
         return _matcher_cache["master_matcher"]
 
     _, base_stock = _load_cached_stock()
     reviewed_decisions = load_reviewed_analog_decisions(DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH)
+    manual_selection_memory = load_manual_selection_memory(manual_memory_path)
     substitution_policy = load_substitution_policy()
     stock_items = clone_stock_items(base_stock)
     master = StockMatcher(
         stock_items,
         reviewed_analog_decisions=reviewed_decisions,
+        manual_selection_memory=manual_selection_memory,
         substitution_policy=substitution_policy,
     )
     _matcher_cache["fingerprint"] = fp
@@ -249,6 +269,8 @@ def _serialize_candidate(analog) -> dict[str, Any]:
     }
     if analog.stock.source_label:
         result["source_label"] = analog.stock.source_label
+    if getattr(analog, "manual_learning_boost", 0.0) > 0.0:
+        result["manager_choice"] = True
     return result
 
 
@@ -437,6 +459,12 @@ def _run_pipeline(upload_path: Path, job_dir: Path) -> dict[str, Any]:
             "available_qty": result.available_qty,
             "analogs": analogs_list,
             "approved_analog": None,  # will be set by manager
+            "initial_status": result.status,
+            "raw_query": result.order.raw_query,
+            "search_text": result.order.search_text,
+            "key_tokens": sorted(result.order.key_tokens),
+            "root_tokens": sorted(result.order.root_tokens),
+            "dimension_tags": sorted(result.order.dimension_tags),
         }
         rows.append(row)
 
@@ -483,6 +511,103 @@ def _save_job(job_id: str, data: dict[str, Any]) -> None:
     job_dir = JOBS_DIR / job_id
     result_path = job_dir / "result.json"
     result_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_manual_selection_payload(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {
+            "version": 1,
+            "entry_count": 0,
+            "updated_at": "",
+            "entries": [],
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "version": 1,
+            "entry_count": 0,
+            "updated_at": "",
+            "entries": [],
+        }
+    if not isinstance(payload.get("entries"), list):
+        payload["entries"] = []
+    payload["version"] = int(payload.get("version", 1) or 1)
+    payload["entry_count"] = len(payload["entries"])
+    payload["updated_at"] = str(payload.get("updated_at", ""))
+    return payload
+
+
+def _save_manual_selection_payload(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _record_manual_selection_learning(
+    *,
+    job_id: str,
+    row: dict[str, Any],
+    candidate: dict[str, Any],
+    search_query: str,
+) -> bool:
+    if row.get("initial_status") != STATUS_NOT_FOUND:
+        return False
+
+    path = _manual_selection_memory_path()
+    payload = _load_manual_selection_payload(path)
+    entries = [entry for entry in payload.get("entries", []) if entry.get("record_id") != f"{job_id}:{row['id']}"]
+
+    query = str(row.get("raw_query") or row.get("name") or "").strip()
+    query_key = str(row.get("search_text") or build_search_text(query)).strip()
+    key_tokens = list(row.get("key_tokens") or [])
+    root_tokens = list(row.get("root_tokens") or [])
+    dimension_tags = list(row.get("dimension_tags") or [])
+    if not key_tokens or not root_tokens or not dimension_tags:
+        query_tokens = extract_tokens(query_key)
+        if not key_tokens:
+            key_tokens = sorted(extract_key_tokens(query_tokens))
+        if not root_tokens:
+            root_tokens = sorted(extract_root_tokens(query_tokens))
+        if not dimension_tags:
+            derived_tags = (
+                extract_dimension_tags(query)
+                | extract_family_tags(query)
+                | extract_parser_hint_tags(query)
+                | extract_material_tags_from_search_text(query_key)
+            )
+            dimension_tags = sorted(derived_tags)
+
+    clean_search_query = search_query.strip()
+    entries.append(
+        {
+            "record_id": f"{job_id}:{row['id']}",
+            "job_id": job_id,
+            "row_id": row["id"],
+            "selected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "query": query,
+            "query_key": query_key,
+            "order_key_tokens": key_tokens,
+            "order_root_tokens": root_tokens,
+            "order_dimension_tags": dimension_tags,
+            "manual_search_query": clean_search_query,
+            "manual_search_query_key": build_search_text(clean_search_query) if clean_search_query else "",
+            "candidate_code": str(candidate.get("code_1c") or "").strip(),
+            "candidate_name": str(candidate.get("name") or "").strip(),
+            "candidate_source_label": str(candidate.get("source_label") or "").strip(),
+            "selected_via": "manual_search",
+        }
+    )
+
+    payload["entries"] = entries
+    payload["entry_count"] = len(entries)
+    payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _save_manual_selection_payload(path, payload)
+
+    _matcher_cache["fingerprint"] = None
+    _matcher_cache["master_matcher"] = None
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +687,8 @@ def approve_analogs(job_id: str, body: ApproveRequest, authorization: str | None
                 if analog["code_1c"] == code:
                     row["approved_analog"] = analog
                     row["status"] = "Одобрена замена"
+                    row["selected_via"] = "analog"
+                    row["selection_search_query"] = ""
                     approved_count += 1
                     break
 
@@ -603,6 +730,7 @@ def search_stock_for_row(job_id: str, body: ManualSearchRequest, authorization: 
 class ManualSelectRequest(BaseModel):
     row_id: str
     candidate: dict[str, Any]
+    search_query: str = ""
 
 
 @app.post("/api/jobs/{job_id}/select")
@@ -626,8 +754,12 @@ def select_manual_candidate(job_id: str, body: ManualSelectRequest, authorizatio
     }
     if candidate.get("source_label"):
         approved["source_label"] = candidate["source_label"]
+    if candidate.get("manager_choice"):
+        approved["manager_choice"] = True
     row["approved_analog"] = approved
     row["status"] = "Одобрена замена"
+    row["selected_via"] = "manual_search"
+    row["selection_search_query"] = body.search_query.strip()
 
     analog_codes = {analog.get("code_1c") for analog in row.get("analogs", [])}
     if approved["code_1c"] not in analog_codes:
@@ -708,6 +840,23 @@ def export_1c_file(job_id: str, authorization: str | None = Header(None)):
     job_dir = JOBS_DIR / job_id
     export_path = job_dir / "export_for_1c.xlsx"
     wb.save(export_path)
+
+    learning_saved_count = 0
+    for row in data["rows"]:
+        if row.get("selected_via") != "manual_search":
+            continue
+        approved_analog = row.get("approved_analog")
+        if not isinstance(approved_analog, dict):
+            continue
+        if _record_manual_selection_learning(
+            job_id=job_id,
+            row=row,
+            candidate=approved_analog,
+            search_query=str(row.get("selection_search_query") or ""),
+        ):
+            learning_saved_count += 1
+    if learning_saved_count:
+        _save_job(job_id, data)
 
     return FileResponse(
         path=str(export_path),

@@ -39,6 +39,7 @@ from nomenclature_classifier import ClassificationStatus, QueryClassification, l
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH = PROJECT_ROOT / "data" / "reviewed_analog_decisions.json"
+DEFAULT_MANUAL_SELECTION_MEMORY_PATH = PROJECT_ROOT / "data" / "manual_selection_memory.json"
 CLASSIFIER_CONFIG_PATH = PROJECT_ROOT / "data" / "nomenclature_classifier_config.json"
 DOMAIN_DICTIONARY_PATH = PROJECT_ROOT / "data" / "vgs2000_matching_dictionary.json"
 SUBSTITUTION_POLICY_PATH = PROJECT_ROOT / "data" / "substitution_policy.json"
@@ -669,6 +670,28 @@ class Candidate:
     matched_dimension_keys: tuple[str, ...] = ()
     conflicting_dimension_keys: tuple[str, ...] = ()
     review_decision: str = ""
+    manual_learning_boost: float = 0.0
+    manual_learning_allowed: bool = False
+
+
+@dataclass(frozen=True)
+class ManualSelectionEntry:
+    record_id: str
+    candidate_code: str
+    query: str
+    query_key: str
+    order_key_tokens: tuple[str, ...] = ()
+    order_root_tokens: tuple[str, ...] = ()
+    order_dimension_tags: tuple[str, ...] = ()
+    manual_search_query: str = ""
+    manual_search_query_key: str = ""
+
+
+@dataclass(frozen=True)
+class ManualLearningSignal:
+    boost: float
+    allow_incompatible: bool = False
+    reasons: tuple[str, ...] = ()
 
 
 @dataclass
@@ -721,6 +744,76 @@ def build_review_query_keys(*parts: object) -> tuple[str, ...]:
         if normalized and normalized not in keys:
             keys.append(normalized)
     return tuple(keys)
+
+
+def _dedupe_text_values(values: object) -> tuple[str, ...]:
+    if not isinstance(values, (list, tuple, set)):
+        return ()
+    result: list[str] = []
+    for value in values:
+        text = clean_text(value)
+        if text and text not in result:
+            result.append(text)
+    return tuple(result)
+
+
+def load_manual_selection_memory(path: Path | None) -> tuple[ManualSelectionEntry, ...]:
+    if path is None or not path.exists():
+        return ()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw_entries = payload.get("entries", [])
+    if not isinstance(raw_entries, list):
+        return ()
+
+    entries: list[ManualSelectionEntry] = []
+    for raw in raw_entries:
+        if not isinstance(raw, Mapping):
+            continue
+        query = clean_text(raw.get("query"))
+        query_key = clean_text(raw.get("query_key")) or build_search_text(query)
+        candidate_code = normalize_candidate_code(raw.get("candidate_code"))
+        if not query_key or not candidate_code:
+            continue
+
+        order_key_tokens = _dedupe_text_values(raw.get("order_key_tokens"))
+        order_root_tokens = _dedupe_text_values(raw.get("order_root_tokens"))
+        order_dimension_tags = _dedupe_text_values(raw.get("order_dimension_tags"))
+        if not order_key_tokens or not order_root_tokens or not order_dimension_tags:
+            parsed_query = query or query_key
+            search_text = query_key or build_search_text(parsed_query)
+            parsed_tokens = extract_tokens(search_text)
+            if not order_key_tokens:
+                order_key_tokens = tuple(sorted(extract_key_tokens(parsed_tokens)))
+            if not order_root_tokens:
+                order_root_tokens = tuple(sorted(extract_root_tokens(parsed_tokens)))
+            if not order_dimension_tags:
+                derived_tags = (
+                    extract_dimension_tags(parsed_query)
+                    | extract_family_tags(parsed_query)
+                    | extract_parser_hint_tags(parsed_query)
+                    | extract_material_tags_from_search_text(search_text)
+                )
+                order_dimension_tags = tuple(sorted(derived_tags))
+
+        manual_search_query = clean_text(raw.get("manual_search_query") or raw.get("search_query"))
+        manual_search_query_key = clean_text(raw.get("manual_search_query_key")) or build_search_text(manual_search_query)
+        record_id = clean_text(raw.get("record_id")) or f"{candidate_code}:{query_key}"
+
+        entries.append(
+            ManualSelectionEntry(
+                record_id=record_id,
+                candidate_code=candidate_code,
+                query=query,
+                query_key=query_key,
+                order_key_tokens=order_key_tokens,
+                order_root_tokens=order_root_tokens,
+                order_dimension_tags=order_dimension_tags,
+                manual_search_query=manual_search_query,
+                manual_search_query_key=manual_search_query_key,
+            )
+        )
+
+    return tuple(entries)
 
 
 def load_reviewed_analog_decisions(path: Path | None) -> dict[str, dict[str, str]]:
@@ -2420,6 +2513,7 @@ class StockMatcher:
         self,
         stock_items: Sequence[StockItem],
         reviewed_analog_decisions: Mapping[str, Mapping[str, str]] | None = None,
+        manual_selection_memory: Sequence[ManualSelectionEntry] | None = None,
         substitution_policy: Mapping[str, object] | None = None,
     ):
         self.stock_items = list(stock_items)
@@ -2427,6 +2521,7 @@ class StockMatcher:
             query_key: {normalize_candidate_code(code): str(decision) for code, decision in decisions.items()}
             for query_key, decisions in (reviewed_analog_decisions or {}).items()
         }
+        self.manual_selection_memory = tuple(manual_selection_memory or ())
         self.substitution_policy = dict(substitution_policy or {})
         self.search_token_lists: list[tuple[str, ...]] = []
         self.search_token_positions: list[dict[str, tuple[int, ...]]] = []
@@ -2434,9 +2529,14 @@ class StockMatcher:
         token_index: defaultdict[str, list[int]] = defaultdict(list)
         root_index: defaultdict[str, list[int]] = defaultdict(list)
         code_index: defaultdict[str, list[int]] = defaultdict(list)
+        normalized_code_index: defaultdict[str, list[int]] = defaultdict(list)
         dimension_index: defaultdict[str, list[int]] = defaultdict(list)
         dimension_group_index: defaultdict[str, list[int]] = defaultdict(list)
         self._candidate_cache: dict[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], list[int]] = {}
+        self._manual_learning_cache: dict[
+            tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]],
+            dict[int, ManualLearningSignal],
+        ] = {}
         for index, item in enumerate(self.stock_items):
             token_list = tuple(item.search_text.split())
             token_positions: defaultdict[str, list[int]] = defaultdict(list)
@@ -2452,6 +2552,9 @@ class StockMatcher:
                 root_index[token].append(index)
             for token in item.code_tokens:
                 code_index[token].append(index)
+            normalized_code = normalize_candidate_code(item.code_1c)
+            if normalized_code:
+                normalized_code_index[normalized_code].append(index)
 
             expanded_dimensions = expand_dimension_values(group_dimension_tags(item.dimension_tags))
             for key, values in expanded_dimensions.items():
@@ -2465,6 +2568,7 @@ class StockMatcher:
         self.token_index = dict(token_index)
         self.root_index = dict(root_index)
         self.code_index = dict(code_index)
+        self.normalized_code_index = dict(normalized_code_index)
         self.dimension_index = dict(dimension_index)
         self.dimension_group_index = dict(dimension_group_index)
         self.search_token_counts = np.array([len(item.search_tokens) for item in self.stock_items], dtype=np.float64)
@@ -2473,6 +2577,7 @@ class StockMatcher:
         forked = object.__new__(StockMatcher)
         forked.stock_items = clone_stock_items(self.stock_items)
         forked.reviewed_analog_decisions = self.reviewed_analog_decisions
+        forked.manual_selection_memory = self.manual_selection_memory
         forked.substitution_policy = self.substitution_policy
         forked.search_token_lists = self.search_token_lists
         forked.search_token_positions = self.search_token_positions
@@ -2480,10 +2585,12 @@ class StockMatcher:
         forked.token_index = self.token_index
         forked.root_index = self.root_index
         forked.code_index = self.code_index
+        forked.normalized_code_index = self.normalized_code_index
         forked.dimension_index = self.dimension_index
         forked.dimension_group_index = self.dimension_group_index
         forked.search_token_counts = self.search_token_counts
         forked._candidate_cache = {}
+        forked._manual_learning_cache = {}
         return forked
 
     def _review_decision_for_candidate(self, order: OrderLine, candidate_code: str) -> str:
@@ -2493,6 +2600,107 @@ class StockMatcher:
             if decision:
                 return decision
         return ""
+
+    def _manual_learning_signature(
+        self,
+        order: OrderLine,
+    ) -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        return (
+            order.search_text,
+            tuple(sorted(order.key_tokens)),
+            tuple(sorted(order.root_tokens)),
+            tuple(sorted(order.dimension_tags)),
+        )
+
+    def _signal_from_manual_entry(
+        self,
+        *,
+        order: OrderLine,
+        current_query_keys: set[str],
+        entry: ManualSelectionEntry,
+    ) -> ManualLearningSignal | None:
+        order_key_tokens = set(order.key_tokens)
+        order_root_tokens = set(order.root_tokens)
+        order_dimension_tags = set(order.dimension_tags)
+        learned_key_tokens = set(entry.order_key_tokens)
+        learned_root_tokens = set(entry.order_root_tokens)
+        learned_dimension_tags = set(entry.order_dimension_tags)
+
+        exact_query_match = entry.query_key in current_query_keys
+        query_ratio = token_set_ratio(order.search_text.split(), entry.query_key.split())
+        key_overlap = safe_overlap(order_key_tokens, learned_key_tokens)
+        root_overlap = safe_overlap(order_root_tokens, learned_root_tokens)
+        dimension_overlap = safe_overlap(order_dimension_tags, learned_dimension_tags)
+        manual_query_ratio = (
+            token_set_ratio(order.search_text.split(), entry.manual_search_query_key.split())
+            if entry.manual_search_query_key
+            else 0.0
+        )
+
+        boost = 0.0
+        allow_incompatible = False
+        reasons: list[str] = []
+
+        if exact_query_match:
+            boost = 34.0
+            allow_incompatible = True
+            reasons.append("такую же позицию менеджер уже выбирал вручную")
+        elif query_ratio >= 86.0 or (key_overlap >= 0.75 and root_overlap >= 0.65):
+            boost = 24.0
+            allow_incompatible = True
+            reasons.append("похоже на прошлый ручной выбор менеджера")
+        elif query_ratio >= 74.0 or key_overlap >= 0.55 or (root_overlap >= 0.60 and manual_query_ratio >= 45.0):
+            boost = 16.0
+            reasons.append("есть сильное сходство с прошлым ручным выбором")
+        elif query_ratio >= 68.0 and (key_overlap >= 0.35 or root_overlap >= 0.45 or manual_query_ratio >= 60.0):
+            boost = 10.0
+            reasons.append("учтён похожий прошлый ручной выбор")
+        else:
+            return None
+
+        shared_tokens = sorted(order_key_tokens & learned_key_tokens)
+        if shared_tokens:
+            reasons.append(f"совпали ключевые слова: {', '.join(shared_tokens[:4])}")
+        if dimension_overlap >= 0.25:
+            boost += 4.0
+            reasons.append("совпадают техпараметры из прошлой ручной замены")
+        if manual_query_ratio >= 72.0:
+            boost += 3.0
+            reasons.append("совпадает логика ручного поиска менеджера")
+
+        return ManualLearningSignal(
+            boost=min(38.0, boost),
+            allow_incompatible=allow_incompatible,
+            reasons=tuple(dict.fromkeys(reasons)),
+        )
+
+    def _manual_learning_signals(self, order: OrderLine) -> dict[int, ManualLearningSignal]:
+        if not self.manual_selection_memory:
+            return {}
+
+        signature = self._manual_learning_signature(order)
+        cached = self._manual_learning_cache.get(signature)
+        if cached is not None:
+            return cached
+
+        current_query_keys = set(build_review_query_keys(order.raw_query or order.name, order.name, order.search_text))
+        current_query_keys.add(order.search_text)
+        signals: dict[int, ManualLearningSignal] = {}
+        for entry in self.manual_selection_memory:
+            signal = self._signal_from_manual_entry(
+                order=order,
+                current_query_keys=current_query_keys,
+                entry=entry,
+            )
+            if signal is None:
+                continue
+            for stock_index in self.normalized_code_index.get(entry.candidate_code, []):
+                current = signals.get(stock_index)
+                if current is None or signal.boost > current.boost:
+                    signals[stock_index] = signal
+
+        self._manual_learning_cache[signature] = signals
+        return signals
 
     def _sort_candidates(self, candidates: Sequence[Candidate]) -> list[Candidate]:
         ranked = list(candidates)
@@ -2557,8 +2765,11 @@ class StockMatcher:
         family, policy = self._policy_for_order(order, candidate)
         if not policy or not bool(policy.get("allow_exact")):
             return ""
+        if candidate.manual_learning_allowed:
+            return ""
         required_keys = [str(key) for key in policy.get("exact_required", []) if str(key)]
         min_score = float(policy.get("exact_min_score", 0.0) or 0.0)
+        effective_score = max(0.0, candidate.score - candidate.manual_learning_boost)
         if candidate.dimension_penalty != 0:
             return ""
         if not self._matches_policy_requirements(order, candidate, required_keys):
@@ -2567,7 +2778,7 @@ class StockMatcher:
             return ""
         if self._hits_policy_exact_only_forbidden_tokens(order, candidate, policy):
             return ""
-        if candidate.score < min_score:
+        if effective_score < min_score:
             order_materials = extract_tag_values(order.dimension_tags, "mclass:")
             stock_materials = extract_tag_values(candidate.stock.dimension_tags, "mclass:")
             shared_materials = order_materials & stock_materials
@@ -2667,9 +2878,10 @@ class StockMatcher:
         filtered: list[Candidate] = []
         for candidate in candidates:
             approved = candidate.review_decision == REVIEW_DECISION_APPROVED
-            if candidate.score < 50.0 and not approved:
+            learned = candidate.manual_learning_boost > 0.0
+            if candidate.score < 50.0 and not approved and not learned:
                 continue
-            if candidate.dimension_penalty > 0 and not approved:
+            if candidate.dimension_penalty > 0 and not approved and not candidate.manual_learning_allowed:
                 continue
             if (
                 candidate.overlap < 0.25
@@ -2677,6 +2889,7 @@ class StockMatcher:
                 and candidate.dimension_bonus < 10.0
                 and not candidate.code_hit
                 and not approved
+                and not learned
             ):
                 continue
             filtered.append(candidate)
@@ -2716,6 +2929,8 @@ class StockMatcher:
         if not candidate_ids:
             for tag in order.dimension_tags:
                 candidate_ids.update(self.dimension_index.get(tag, []))
+        if self.manual_selection_memory:
+            candidate_ids.update(self._manual_learning_signals(order))
         candidates = list(candidate_ids)
         self._candidate_cache[signature] = candidates
         return candidates
@@ -2728,17 +2943,26 @@ class StockMatcher:
     ) -> list[Candidate]:
         if candidate_ids is None:
             candidate_ids = self.generate_candidates(order)
+        manual_signals = self._manual_learning_signals(order)
         scored = [
-            self.score_candidate(order, self.stock_items[index])
+            self.score_candidate(order, self.stock_items[index], manual_learning_signal=manual_signals.get(index))
             for index in candidate_ids
-            if self.is_candidate_compatible(order, self.stock_items[index])
+            if (
+                self.is_candidate_compatible(order, self.stock_items[index])
+                or bool(manual_signals.get(index) and manual_signals[index].allow_incompatible)
+            )
         ]
         scored = self._sort_candidates(self._apply_reviewed_candidate_decisions(order, scored))
         if limit is None:
             return scored
         return scored[:limit]
 
-    def score_candidate(self, order: OrderLine, stock: StockItem) -> Candidate:
+    def score_candidate(
+        self,
+        order: OrderLine,
+        stock: StockItem,
+        manual_learning_signal: ManualLearningSignal | None = None,
+    ) -> Candidate:
         query_tokens = order.search_text.split()
         stock_tokens = stock.search_text.split()
         set_ratio = token_set_ratio(query_tokens, stock_tokens)
@@ -2802,6 +3026,20 @@ class StockMatcher:
         if stock.remaining <= 0:
             reasons.append("остаток уже исчерпан")
 
+        manual_learning_boost = 0.0
+        manual_learning_allowed = False
+        if manual_learning_signal is not None:
+            manual_learning_boost = manual_learning_signal.boost
+            manual_learning_allowed = manual_learning_signal.allow_incompatible
+            score += manual_learning_boost
+            reasons.extend(manual_learning_signal.reasons)
+            if manual_learning_boost >= 34.0:
+                score = max(score, 72.0)
+            elif manual_learning_boost >= 24.0:
+                score = max(score, 64.0)
+            elif manual_learning_boost >= 16.0:
+                score = max(score, 56.0)
+
         return Candidate(
             stock=stock,
             score=max(0.0, min(100.0, score)),
@@ -2813,6 +3051,8 @@ class StockMatcher:
             soft_overlap=soft_overlap,
             matched_dimension_keys=tuple(dict.fromkeys(matched_dimension_keys)),
             conflicting_dimension_keys=tuple(dict.fromkeys(conflicting_dimension_keys)),
+            manual_learning_boost=manual_learning_boost,
+            manual_learning_allowed=manual_learning_allowed,
         )
 
     def find_candidates(self, order: OrderLine, limit: int = 5) -> list[Candidate]:
@@ -3070,22 +3310,24 @@ class StockMatcher:
         best = candidates[0]
         second = candidates[1] if len(candidates) > 1 else None
         gap = best.score - second.score if second else best.score
+        best_exact_score = max(0.0, best.score - best.manual_learning_boost)
         _, policy = self._policy_for_order(order, best)
         generic_exact_allowed = not policy or bool(policy.get("allow_exact"))
+        exact_learning_block = best.manual_learning_allowed
 
-        if best.code_hit and best.dimension_penalty == 0 and best.score >= 78 and best.overlap >= 0.30:
+        if not exact_learning_block and best.code_hit and best.dimension_penalty == 0 and best_exact_score >= 78 and best.overlap >= 0.30:
             return "exact", best, "совпал код/марка"
         for candidate in candidates:
             policy_exact_reason = self._exact_reason_by_policy(order, candidate)
             if policy_exact_reason:
                 return "exact", candidate, policy_exact_reason
-        if is_exact_pipe_candidate(order, best) and best.score >= 84:
+        if not exact_learning_block and is_exact_pipe_candidate(order, best) and best_exact_score >= 84:
             return "exact", best, "совпали тип трубы, размер и ГОСТ"
-        if generic_exact_allowed and best.score >= 90 and best.overlap >= 0.55 and best.dimension_penalty == 0 and gap >= 4:
+        if not exact_learning_block and generic_exact_allowed and best_exact_score >= 90 and best.overlap >= 0.55 and best.dimension_penalty == 0 and gap >= 4:
             return "exact", best, "высокая уверенность"
-        if generic_exact_allowed and "tripledn" in best.matched_dimension_keys and best.dimension_penalty == 0 and best.score >= 60 and gap >= 5:
+        if not exact_learning_block and generic_exact_allowed and "tripledn" in best.matched_dimension_keys and best.dimension_penalty == 0 and best_exact_score >= 60 and gap >= 5:
             return "exact", best, "совпали тип изделия и тройные размеры"
-        if generic_exact_allowed and best.score >= 82 and best.overlap >= 0.65 and best.dimension_bonus >= 10 and gap >= 5:
+        if not exact_learning_block and generic_exact_allowed and best_exact_score >= 82 and best.overlap >= 0.65 and best.dimension_bonus >= 10 and gap >= 5:
             return "exact", best, "совпали ключевые слова и размеры"
         policy_analog_reason = self._analog_reason_by_policy(order, best)
         if policy_analog_reason:
@@ -3115,6 +3357,7 @@ def determine_analog_status(
     best = candidates[0]
     second = candidates[1] if len(candidates) > 1 else None
     gap = best.score - second.score if second else best.score
+    effective_score = max(0.0, best.score - best.manual_learning_boost)
     _, policy = get_substitution_family_policy(order=order, candidate=best, substitution_policy=substitution_policy)
     safe_required = [str(key) for key in policy.get("safe_required", []) if str(key)] if policy else []
     approval_only = bool(policy.get("approval_only")) if policy else False
@@ -3134,13 +3377,13 @@ def determine_analog_status(
     rule_safe = (
         best.dimension_penalty == 0
         and best.dimension_bonus >= 18.0
-        and best.score >= 58.0
+        and effective_score >= 58.0
         and gap >= 3.0
         and (best.overlap >= 0.35 or best.soft_overlap >= 0.45 or best.code_hit)
     )
     high_confidence_safe = (
         best.dimension_penalty == 0
-        and best.score >= 72.0
+        and effective_score >= 72.0
         and gap >= 4.0
         and best.overlap >= 0.5
     )
@@ -3150,7 +3393,7 @@ def determine_analog_status(
         and order is not None
         and safe_required
         and best.dimension_penalty == 0
-        and best.score >= safe_min_score
+        and effective_score >= safe_min_score
         and gap >= 3.0
         and candidate_matches_policy_dimensions(order, best, safe_required)
         and not policy_forbidden
@@ -3172,11 +3415,12 @@ def match_orders(
     for line in lines:
         candidates = matcher.find_candidates(line)
         match_kind, best, reason = matcher.classify(line, candidates)
+        has_manual_learning_signal = any(candidate.manual_learning_boost > 0.0 for candidate in candidates)
         # Use full NumPy scan as fallback only when token-based search is
         # inconclusive: no candidates, low confidence, or nothing found at all.
         # Skip when token-based already returned a confident analog (score ≥ 68)
         # to avoid the per-item compatibility check overhead on every row.
-        needs_exhaustive = use_full_scan_fallback and match_kind != "exact" and (
+        needs_exhaustive = use_full_scan_fallback and match_kind != "exact" and not has_manual_learning_signal and (
             not candidates
             or match_kind == "not_found"
             or best is None
@@ -3324,6 +3568,8 @@ def format_candidate_text(candidate: Candidate, include_score: bool = True) -> s
         base = f"{base} | score {candidate.score:.1f}"
     if candidate.review_decision == REVIEW_DECISION_APPROVED:
         return f"{base} | подтверждено"
+    if candidate.manual_learning_boost > 0.0:
+        return f"{base} | учтён ручной выбор"
     return base
 
 
@@ -3863,6 +4109,7 @@ def main() -> int:
         else DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH
     )
     reviewed_decisions = load_reviewed_analog_decisions(reviewed_decisions_path)
+    manual_selection_memory = load_manual_selection_memory(DEFAULT_MANUAL_SELECTION_MEMORY_PATH)
     substitution_policy = load_substitution_policy()
 
     base_stock_items = load_stock(stock_path)
@@ -3878,6 +4125,7 @@ def main() -> int:
         matcher = StockMatcher(
             stock_items,
             reviewed_analog_decisions=reviewed_decisions,
+            manual_selection_memory=manual_selection_memory,
             substitution_policy=substitution_policy,
         )
         order_lines = load_order_lines(order_path)

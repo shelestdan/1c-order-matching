@@ -9,6 +9,7 @@ let allRows = [];
 let currentFilter = 'all';
 let pendingApprovals = {};  // row_id -> analog code_1c
 let searchResultsByRow = {}; // row_id -> manual search results
+let selectionInFlightRows = new Set();
 
 /* ===== Init ===== */
 document.addEventListener('DOMContentLoaded', () => {
@@ -264,10 +265,15 @@ function warehouseBadge(label) {
   return `<span class="warehouse-badge">${esc(label)}</span>`;
 }
 
+function managerChoiceBadge(enabled) {
+  if (!enabled) return '';
+  return '<span class="manager-choice-badge">выбор менеджеров</span>';
+}
+
 function buildMatchCell(row) {
   if (row.approved_analog) {
     const a = row.approved_analog;
-    return `<div class="match-name">${esc(a.name)} ${warehouseBadge(a.source_label)}</div>
+    return `<div class="match-name">${esc(a.name)} ${warehouseBadge(a.source_label)} ${managerChoiceBadge(a.manager_choice)}</div>
             <div class="match-code">${esc(a.code_1c)}</div>
             <div class="match-comment" style="color:var(--approved)">Одобрено менеджером</div>`;
   }
@@ -282,7 +288,7 @@ function buildMatchCell(row) {
   if (APPROVAL_STATUSES.has(row.status) && row.analogs && row.analogs.length) {
     const a = row.analogs[0];
     const zeroStock = a.remaining === 0 || a.remaining === '0';
-    return `<div class="match-name">${esc(a.name)} ${warehouseBadge(a.source_label)}</div>
+    return `<div class="match-name">${esc(a.name)} ${warehouseBadge(a.source_label)} ${managerChoiceBadge(a.manager_choice)}</div>
             <div class="match-code">${esc(a.code_1c)}</div>
             <div class="match-comment">${zeroStock ? '<span style="color:var(--notfound)">Нет в наличии · </span>' : ''}Лучший аналог (score ${a.score})</div>`;
   }
@@ -358,32 +364,25 @@ document.getElementById('analog-modal').addEventListener('click', (e) => {
 async function selectAnalog(rowId, code) {
   pendingApprovals[rowId] = code;
 
-  // Send to server
-  try {
-    const res = await apiFetch(`/api/jobs/${currentJob.job_id}/approve`, 'POST', {
-      approvals: { [rowId]: code }
-    });
+  const res = await apiFetch(`/api/jobs/${currentJob.job_id}/approve`, 'POST', {
+    approvals: { [rowId]: code }
+  });
 
-    // Update local state
-    const row = allRows.find(r => r.id === rowId);
-    if (row) {
-      const analog = row.analogs.find(a => a.code_1c === code);
-      if (analog) {
-        row.approved_analog = analog;
-        row.status = 'Одобрена замена';
-      }
+  const row = allRows.find(r => r.id === rowId);
+  if (row) {
+    const analog = row.analogs.find(a => a.code_1c === code);
+    if (analog) {
+      row.approved_analog = analog;
+      row.status = 'Одобрена замена';
     }
-
-    // Update stats from server response
-    if (currentJob && res.status_counts) {
-      currentJob.status_counts = res.status_counts;
-    }
-
-    closeModal();
-    renderResults(currentJob);
-  } catch (ex) {
-    alert('Ошибка: ' + ex.message);
   }
+
+  if (currentJob && res.status_counts) {
+    currentJob.status_counts = res.status_counts;
+  }
+
+  closeModal();
+  renderResults(currentJob);
 }
 
 function renderCandidateList(containerId, candidates, rowId, source) {
@@ -402,11 +401,12 @@ function renderCandidateList(containerId, candidates, rowId, source) {
   candidates.forEach((candidate) => {
     const isSelected = pendingApprovals[rowId] === candidate.code_1c
       || allRows.find(r => r.id === rowId)?.approved_analog?.code_1c === candidate.code_1c;
+    const isBusy = selectionInFlightRows.has(rowId);
     const card = document.createElement('div');
     card.className = 'analog-card';
     card.innerHTML = `
       <div class="analog-info">
-        <div class="analog-name">${esc(candidate.name)} ${warehouseBadge(candidate.source_label)}</div>
+        <div class="analog-name">${esc(candidate.name)} ${warehouseBadge(candidate.source_label)} ${managerChoiceBadge(candidate.manager_choice)}</div>
         <div class="analog-code">${esc(candidate.code_1c)}</div>
         <div class="analog-meta">
           ${candidate.score != null ? `<span>Score: <strong>${candidate.score}</strong></span>` : ''}
@@ -418,8 +418,9 @@ function renderCandidateList(containerId, candidates, rowId, source) {
       </div>
       <div class="analog-action">
         <button class="btn btn-approve-sm ${isSelected ? 'btn-selected' : ''}"
-          onclick="chooseCandidate('${rowId}', '${source}', '${esc(candidate.code_1c)}')">
-          ${isSelected ? '✓ Выбрано' : 'Выбрать'}
+          ${isBusy ? 'disabled' : ''}
+          onclick="chooseCandidate('${rowId}', '${source}', '${esc(candidate.code_1c)}', this)">
+          ${isSelected ? '✓ Выбрано' : isBusy ? 'Сохраняем...' : 'Выбрать'}
         </button>
       </div>
     `;
@@ -450,39 +451,61 @@ async function runManualSearch() {
   }
 }
 
-async function chooseCandidate(rowId, source, code) {
+async function chooseCandidate(rowId, source, code, button) {
+  if (selectionInFlightRows.has(rowId)) return;
+  selectionInFlightRows.add(rowId);
+  renderCandidateList('analog-list', allRows.find(r => r.id === rowId)?.analogs || [], rowId, 'analog');
+  renderCandidateList('search-results-list', searchResultsByRow[rowId] || [], rowId, 'search');
   if (source === 'analog') {
-    await selectAnalog(rowId, code);
+    try {
+      await selectAnalog(rowId, code);
+    } catch (ex) {
+      alert('Ошибка: ' + ex.message);
+      renderCandidateList('analog-list', allRows.find(r => r.id === rowId)?.analogs || [], rowId, 'analog');
+      renderCandidateList('search-results-list', searchResultsByRow[rowId] || [], rowId, 'search');
+    } finally {
+      selectionInFlightRows.delete(rowId);
+    }
     return;
   }
   const candidates = searchResultsByRow[rowId] || [];
   const candidate = candidates.find(item => item.code_1c === code);
   if (!candidate) {
+    selectionInFlightRows.delete(rowId);
+    renderCandidateList('analog-list', allRows.find(r => r.id === rowId)?.analogs || [], rowId, 'analog');
+    renderCandidateList('search-results-list', searchResultsByRow[rowId] || [], rowId, 'search');
     alert('Кандидат поиска не найден');
     return;
   }
   try {
+    const searchQuery = document.getElementById('manual-search-input')?.value?.trim() || '';
     const res = await apiFetch(`/api/jobs/${currentJob.job_id}/select`, 'POST', {
       row_id: rowId,
       candidate,
+      search_query: searchQuery,
     });
     pendingApprovals[rowId] = code;
     const row = allRows.find(r => r.id === rowId);
     if (row) {
-      row.approved_analog = candidate;
-      row.status = 'Одобрена замена';
+      const approved = res.row?.approved_analog || candidate;
+      row.approved_analog = approved;
+      row.status = res.row?.status || 'Одобрена замена';
       row.analogs = row.analogs || [];
-      if (!row.analogs.some(a => a.code_1c === candidate.code_1c)) {
-        row.analogs.unshift(candidate);
+      if (!row.analogs.some(a => a.code_1c === approved.code_1c)) {
+        row.analogs.unshift(approved);
       }
     }
     if (currentJob && res.status_counts) {
       currentJob.status_counts = res.status_counts;
     }
+    selectionInFlightRows.delete(rowId);
     closeModal();
     renderResults(currentJob);
   } catch (ex) {
     alert('Ошибка выбора: ' + ex.message);
+    selectionInFlightRows.delete(rowId);
+    renderCandidateList('analog-list', allRows.find(r => r.id === rowId)?.analogs || [], rowId, 'analog');
+    renderCandidateList('search-results-list', searchResultsByRow[rowId] || [], rowId, 'search');
   }
 }
 

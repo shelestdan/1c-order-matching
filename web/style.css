@@ -123,6 +123,7 @@ body {
 .btn-approve-sm:hover { background: #047857; }
 .btn-approve-sm.btn-selected { background: var(--approved); }
 .btn-approve-sm.btn-selected:hover { background: #6d28d9; }
+.btn-approve-sm:disabled { opacity: .72; cursor: wait; }
 
 .replace-btn { font-size: 12px; opacity: .6; }
 .replace-btn:hover { opacity: 1; }
@@ -575,6 +576,19 @@ tr.row-depleted td:first-child { border-left: 3px solid var(--depleted); }
   font-weight: 600;
   background: #dbeafe;
   color: #1e40af;
+  vertical-align: middle;
+  margin-left: 4px;
+  white-space: nowrap;
+}
+
+.manager-choice-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  background: #fef3c7;
+  color: #92400e;
   vertical-align: middle;
   margin-left: 4px;
   white-space: nowrap;
