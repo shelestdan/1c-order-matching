@@ -1542,11 +1542,6 @@ def extract_dimension_tags(*parts: object) -> set[str]:
         tags.add(f"mat:{match}")
     for match in re.findall(r"\b(?:gost|гост)\s*([0-9]{5})\b", text):
         tags.add(f"spec:{match}")
-    # Legacy flange GOSTs → map to current ГОСТ 33259-2015
-    if re.search(r"\b(?:gost|гост)\s*12820\b", text):
-        tags.update({"spec:33259", "family:flange", "type:01"})
-    if re.search(r"\b(?:gost|гост)\s*12821\b", text):
-        tags.update({"spec:33259", "family:flange", "type:11"})
     for match in re.findall(r"\b(15|30|45|60|87|90|120|180)\s*-\s*([12])\s*-\s*\d{2,4}\s*[xхh]", text):
         tags.add(f"deg:{match[0]}")
         tags.add(f"series:{match[1]}")
