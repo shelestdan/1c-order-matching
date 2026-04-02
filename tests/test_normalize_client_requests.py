@@ -15,6 +15,21 @@ import normalize_client_requests as ncr
 
 
 class NormalizeDocumentRequestTest(unittest.TestCase):
+    def test_merge_wrapped_ocr_lines_combines_multiline_table_item(self) -> None:
+        merged = ncr.merge_wrapped_ocr_lines(
+            "Кран шаровой приварной\n"
+            "Ду20 Ру40 раб.среда вода, 150* полнопроходной шт 480\n"
+            "Фланец 80-16-01-1-В-Ст 20 ГОСТ 33259-2015 шт 50"
+        )
+
+        lines = merged.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("Кран шаровой приварной Ду20 Ру40", lines[0])
+        parsed, issue = ncr.parse_freeform_line(lines[0], "demo.png", "ocr:1")
+        self.assertIsNotNone(parsed)
+        self.assertIsNone(issue)
+        self.assertEqual(parsed.quantity, 480.0)
+
     def test_ocr_table_rows_fall_back_to_freeform_when_header_is_missing(self) -> None:
         extraction = ExtractionResult(
             file="/tmp/request.jpg",

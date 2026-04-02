@@ -154,6 +154,17 @@ body {
 /* ===== Upload ===== */
 .section { padding: 24px; max-width: 1400px; margin: 0 auto; }
 
+.results-alert {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid #f5c46b;
+  background: #fff7e6;
+  color: #8a4b08;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  font-size: 14px;
+}
+
 .drop-zone {
   border: 2px dashed var(--border);
   border-radius: var(--radius-lg);

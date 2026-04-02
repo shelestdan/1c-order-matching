@@ -471,6 +471,48 @@ def parse_freeform_text(text: str, source_file: str, source_prefix: str) -> tupl
     return lines, issues
 
 
+def merge_wrapped_ocr_lines(text: str) -> str:
+    raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(raw_lines) < 2:
+        return "\n".join(raw_lines)
+
+    merged_lines: list[str] = []
+    index = 0
+    while index < len(raw_lines):
+        current = raw_lines[index]
+        if index + 1 >= len(raw_lines):
+            merged_lines.append(current)
+            break
+
+        next_line = raw_lines[index + 1]
+        _, next_body = strip_leading_marker(next_line)
+        has_current_qty = extract_qty_from_text(normalize_parser_line_text(current)) is not None
+        current_parsed, _ = parse_freeform_line(current, "__ocr__", f"ocr:{index}")
+        merged_candidate = clean_text(f"{current} {next_body}")
+        merged_parsed, _ = parse_freeform_line(merged_candidate, "__ocr__", f"ocr:{index}")
+
+        should_merge = (
+            not has_current_qty
+            and merged_parsed is not None
+            and merged_parsed.parse_status != "parsed_text_default_qty"
+            and (
+                current_parsed is None
+                or current_parsed.parse_status == "parsed_text_default_qty"
+                or merged_parsed.confidence > current_parsed.confidence
+            )
+        )
+
+        if should_merge:
+            merged_lines.append(merged_candidate)
+            index += 2
+            continue
+
+        merged_lines.append(current)
+        index += 1
+
+    return "\n".join(merged_lines)
+
+
 def parse_delimited_text(
     text: str,
     source_file: str,
@@ -661,6 +703,8 @@ def normalize_document_request(path: Path) -> tuple[list[ParsedClientLine], list
         )
 
     text = extraction.text
+    if extraction.kind == "image":
+        text = merge_wrapped_ocr_lines(text)
     non_empty_lines = [line for line in text.splitlines() if line.strip()]
     parsed: list[ParsedClientLine]
     parse_issues: list[ParseIssue]

@@ -167,6 +167,18 @@ async function handleTextInput() {
 function renderResults(data) {
   document.getElementById('progress-section').style.display = 'none';
   document.getElementById('results-section').style.display = '';
+  const alertBox = document.getElementById('results-alert');
+  if (alertBox) {
+    const parsedCount = Number(data.parsed_count || 0);
+    const issueCount = Number(data.issue_count || 0);
+    if (parsedCount === 0 && issueCount > 0) {
+      alertBox.style.display = '';
+      alertBox.textContent = 'Из файла не удалось извлечь строки заявки. Для скриншотов и фото на сервере должен быть доступен OCR, иначе сайт покажет пустой результат.';
+    } else {
+      alertBox.style.display = 'none';
+      alertBox.textContent = '';
+    }
+  }
 
   // Stats
   const counts = data.status_counts || {};

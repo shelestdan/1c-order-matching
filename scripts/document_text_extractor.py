@@ -105,6 +105,14 @@ def detect_available_extractors() -> dict[str, object]:
     }
 
 
+def score_text_payload(text: str, lines: list[ExtractionLine], *, warnings: list[str] | None = None) -> float:
+    char_score = len(text.strip())
+    line_score = len(lines) * 24.0
+    confidence_score = statistics.fmean(line.confidence for line in lines) * 40.0 if lines else 0.0
+    warning_penalty = len(warnings or []) * 10.0
+    return char_score + line_score + confidence_score - warning_penalty
+
+
 def is_paddleocr_available() -> bool:
     return PaddleOCR is not None and Image is not None and np is not None
 
@@ -295,6 +303,38 @@ def _iter_paddle_image_variants(path: Path) -> list[tuple[str, object]]:
         ]
 
 
+def _save_tesseract_variant_images(path: Path, tmp_dir: Path) -> list[tuple[str, Path]]:
+    if Image is None:
+        return [("tesseract_raw", path)]
+    with Image.open(path) as loaded:
+        base = ImageOps.exif_transpose(loaded).convert("RGB")
+        longest_edge = max(base.size) if base.size else 0
+        if longest_edge and longest_edge < 1800:
+            scale = min(2.6, 1800 / float(longest_edge))
+            resized = (
+                max(1, int(round(base.size[0] * scale))),
+                max(1, int(round(base.size[1] * scale))),
+            )
+            base = base.resize(resized, Image.Resampling.LANCZOS)
+        grayscale = ImageOps.grayscale(base)
+        contrast = ImageEnhance.Contrast(grayscale).enhance(2.2)
+        sharpened = contrast.filter(ImageFilter.SHARPEN)
+        threshold = contrast.point(lambda value: 255 if value >= 180 else 0)
+
+        variants = [
+            ("tesseract_rgb", base),
+            ("tesseract_gray", grayscale),
+            ("tesseract_contrast", sharpened),
+            ("tesseract_threshold", threshold),
+        ]
+        output: list[tuple[str, Path]] = []
+        for mode_name, image in variants:
+            out_path = tmp_dir / f"{mode_name}.png"
+            image.save(out_path, format="PNG")
+            output.append((mode_name, out_path))
+        return output
+
+
 def extract_image_via_paddleocr(path: Path, *, page: int = 1) -> ExtractionResult | None:
     ocr = get_paddle_ocr()
     if ocr is None:
@@ -393,24 +433,49 @@ def extract_pdf_via_pdftotext(path: Path) -> ExtractionResult | None:
 def extract_image_via_tesseract(path: Path, *, page: int = 1) -> ExtractionResult | None:
     if not is_tool_available("tesseract"):
         return None
-    result = run_command(["tesseract", str(path), "stdout", "-l", "rus+eng", "--psm", "6"])
-    if result.returncode != 0:
+
+    warnings: list[str] = []
+    best_text = ""
+    best_lines: list[ExtractionLine] = []
+    best_mode = "tesseract"
+    best_score = -1.0
+
+    with tempfile.TemporaryDirectory(prefix="tesseract_img_") as tmp_dir:
+        variant_paths = _save_tesseract_variant_images(path, Path(tmp_dir))
+        for mode_name, image_path in variant_paths:
+            for psm in ("6", "11"):
+                result = run_command(["tesseract", str(image_path), "stdout", "-l", "rus+eng", "--psm", psm])
+                if result.returncode != 0:
+                    warnings.append(f"{mode_name}/psm{psm}: {result.stderr.strip() or 'tesseract завершился с ошибкой'}")
+                    continue
+                text = result.stdout.strip()
+                if not text:
+                    continue
+                lines = split_text_to_lines(text, page=page, source="tesseract", confidence=0.72)
+                score = score_text_payload(text, lines)
+                if score > best_score:
+                    best_text = text
+                    best_lines = lines
+                    best_mode = f"{mode_name}_psm{psm}"
+                    best_score = score
+
+    if not best_text:
         return ExtractionResult(
             file=str(path),
             kind="image",
             extraction_mode="tesseract_failed",
             page_count=1,
             text="",
-            warnings=[result.stderr.strip() or "tesseract завершился с ошибкой"],
+            warnings=warnings or ["tesseract не распознал текст на изображении"],
         )
-    text = result.stdout.strip()
     return ExtractionResult(
         file=str(path),
         kind="image",
-        extraction_mode="tesseract",
+        extraction_mode=best_mode,
         page_count=1,
-        text=text,
-        lines=split_text_to_lines(text, page=page, source="tesseract", confidence=0.72),
+        text=best_text,
+        lines=best_lines,
+        warnings=warnings,
     )
 
 
@@ -542,14 +607,21 @@ def extract_via_swift_vision(path: Path) -> ExtractionResult | None:
 
 def merge_attempts(path: Path, attempts: Iterable[ExtractionResult | None]) -> ExtractionResult:
     warnings: list[str] = []
+    best_attempt: ExtractionResult | None = None
+    best_score = -1.0
     for attempt in attempts:
         if attempt is None:
             continue
         warnings.extend(attempt.warnings)
         if attempt.text.strip():
-            if warnings and attempt.warnings != warnings:
-                attempt.warnings = warnings
-            return attempt
+            score = score_text_payload(attempt.text, attempt.lines, warnings=attempt.warnings)
+            if score > best_score:
+                best_score = score
+                best_attempt = attempt
+    if best_attempt is not None:
+        if warnings and best_attempt.warnings != warnings:
+            best_attempt.warnings = warnings
+        return best_attempt
     kind = "pdf" if path.suffix.lower() == ".pdf" else "image"
     return ExtractionResult(
         file=str(path),
