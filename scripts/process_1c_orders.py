@@ -1277,8 +1277,42 @@ def normalize_flange_face(value: str) -> str:
     return face
 
 
+_PLUMBING_ABBREV_MAP: dict[str, list[str]] = {
+    # Material abbreviations (abbreviated → full transliterated forms)
+    "chug": ["chugunnyi", "chugun"],
+    "lat": ["latunnyi", "latun"],
+    "nerzh": ["nerzhaveiushchii", "nerzhaveika"],
+    "oc": ["ocinkovannyi", "ocinkovanaya"],
+    "st": ["stalnoi", "stal"],
+    # Form / connection abbreviations
+    "fl": ["flancevyi", "flanec"],
+    "rez": ["rezbovoi", "rezba"],
+    "svar": ["svarnoi", "svarka"],
+    "shar": ["sharovoi"],
+    "konc": ["koncentricheskii"],
+    "pereh": ["perehod"],
+    "poln": ["polnoprohodnoi"],
+    "komb": ["kombinirovannyi"],
+    "b/n": ["beznapornyi"],
+    "b/shov": ["besshovnyi"],
+    "p/privar": ["privarnoi"],
+    # Polymer abbreviations
+    "pp-r": ["polipropilen"],
+    "pp-md": ["polipropilen"],
+    "pp-h": ["polipropilen"],
+    "ppr": ["polipropilen"],
+    "pe-x": ["polietilen"],
+    "mp": ["metalloplastik"],
+}
+
+
 def expand_search_token_variants(token: str) -> list[str]:
     variants: list[str] = [token]
+
+    # Plumbing abbreviation expansions (bidirectional: short ↔ full)
+    abbrev_expansion = _PLUMBING_ABBREV_MAP.get(token)
+    if abbrev_expansion:
+        variants.extend(abbrev_expansion)
 
     if token == "vgp":
         variants.append("vodogazoprovodnaya")
@@ -2266,7 +2300,6 @@ def iter_stock_rows_from_csv(stock_path: Path) -> Iterable[dict[str, object]]:
 
 _WORKBOOK_COLUMN_MAP: dict[str, str] = {
     "Код1с": "Код1с",
-    "КодТовра": "Код1с",
     "Артикул": "Код1с",
     "Номенклатура": "Номенклатура",
     "НаименованиДляПечати": "НаименованиДляПечати",
