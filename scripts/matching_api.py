@@ -463,6 +463,7 @@ def _serialize_candidate(analog) -> dict[str, Any]:
         "code_1c": analog.stock.code_1c,
         "name": analog.stock.name,
         "score": round(analog.score, 1),
+        "stock_qty": analog.stock.quantity,
         "remaining": analog.stock.remaining,
         "price": analog.stock.sale_price,
         "reasons": analog.reasons,
@@ -656,6 +657,7 @@ def _run_pipeline(upload_path: Path, job_dir: Path) -> dict[str, Any]:
             "matched_name": result.matched_stock.name if result.matched_stock else None,
             "matched_price": result.matched_stock.sale_price if result.matched_stock else None,
             "matched_source_label": result.matched_stock.source_label if result.matched_stock and result.matched_stock.source_label else None,
+            "matched_stock_qty": result.matched_stock.quantity if result.matched_stock else None,
             "available_qty": result.available_qty,
             "analogs": analogs_list,
             "approved_analog": None,  # will be set by manager
@@ -1267,6 +1269,7 @@ def select_manual_candidate(job_id: str, body: ManualSelectRequest, authorizatio
         "code_1c": code,
         "name": name,
         "score": float(candidate.get("score") or 0.0),
+        "stock_qty": candidate.get("stock_qty"),
         "remaining": candidate.get("remaining"),
         "price": candidate.get("price") or "",
         "reasons": list(candidate.get("reasons") or []),

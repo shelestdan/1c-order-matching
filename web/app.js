@@ -302,7 +302,7 @@ function renderTable(rows) {
       <td class="col-qty">${row.requested_qty ?? ''}</td>
       <td>${matchCell}</td>
       <td class="col-score">${row.confidence != null ? row.confidence : ''}</td>
-      <td class="col-remaining">${row.available_qty != null ? row.available_qty : ''}</td>
+      <td class="col-remaining">${displayRemainingQty(row)}</td>
       <td>${actionCell}</td>
     `;
     tbody.appendChild(tr);
@@ -319,6 +319,27 @@ const APPROVAL_STATUSES = new Set([
 function warehouseBadge(label) {
   if (!label) return '';
   return `<span class="warehouse-badge">${esc(label)}</span>`;
+}
+
+function formatQty(value) {
+  if (value == null || value === '') return '';
+  const num = Number(value);
+  if (!Number.isFinite(num)) return esc(String(value));
+  if (Number.isInteger(num)) return String(num);
+  return String(num).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+}
+
+function displayRemainingQty(row) {
+  if (row.approved_analog) {
+    return formatQty(row.approved_analog.stock_qty ?? row.approved_analog.remaining);
+  }
+  if (row.matched_stock_qty != null) {
+    return formatQty(row.matched_stock_qty);
+  }
+  if (APPROVAL_STATUSES.has(row.status) && row.analogs && row.analogs.length) {
+    return formatQty(row.analogs[0].stock_qty ?? row.analogs[0].remaining);
+  }
+  return formatQty(row.available_qty);
 }
 
 function managerChoiceBadge(enabled) {

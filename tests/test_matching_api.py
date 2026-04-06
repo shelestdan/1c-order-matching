@@ -20,7 +20,9 @@ from matching_api import (  # noqa: E402
     _build_export_audit_event,
     _ensure_job_access,
     _hash_password,
+    _serialize_candidate,
 )
+from process_1c_orders import Candidate, StockItem  # noqa: E402
 
 
 class MatchingApiHelpersTest(unittest.TestCase):
@@ -223,6 +225,39 @@ class MatchingApiHelpersTest(unittest.TestCase):
         self.assertEqual(top["times_used"], 2)
         self.assertEqual(top["times_learned"], 2)
         self.assertEqual(top["used_by_count"], 1)
+
+    def test_serialize_candidate_keeps_stock_quantity_separate_from_free_remaining(self) -> None:
+        stock = StockItem(
+            row_index=1,
+            code_1c="001",
+            name="Отвод DN20",
+            print_name="Отвод DN20",
+            product_type="",
+            sale_price="100",
+            stop_price="",
+            plan_price="",
+            quantity=240.0,
+            remaining=88.0,
+            search_text="otvod dn20",
+            search_tokens={"otvod", "dn20"},
+            key_tokens={"otvod", "dn20"},
+            root_tokens={"otvod", "dn20"},
+            code_tokens={"001"},
+            dimension_tags={"dn:20"},
+            source_label="Сантехкомплект",
+        )
+        payload = _serialize_candidate(
+            Candidate(
+                stock=stock,
+                score=100.0,
+                overlap=1.0,
+                soft_overlap=1.0,
+                reasons=["совпал код/марка"],
+            )
+        )
+
+        self.assertEqual(payload["stock_qty"], 240.0)
+        self.assertEqual(payload["remaining"], 88.0)
 
 
 if __name__ == "__main__":
