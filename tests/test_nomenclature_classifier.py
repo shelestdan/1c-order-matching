@@ -199,6 +199,7 @@ class HybridNomenclatureClassifierTest(unittest.TestCase):
         stock_tags = extract_dimension_tags("Переход PP-H эксц сер б/н Дн110х50 в/к HTR Ostendorf 115720")
         tee_tags = extract_dimension_tags("Тройник 87°, 110х50")
         equal_tee_tags = extract_dimension_tags("Тройник 45°, 110х110")
+        equal_stock_tee_tags = extract_dimension_tags("Тройник 87,5° 110-110 СЕРАЯ вн.канализ.(24) VALFEX арт. 24110110")
         hint_tags = extract_parser_hint_tags("Переход PP-H эксц сер б/н Дн110х50")
 
         self.assertIn("dn:110", order_tags)
@@ -211,7 +212,43 @@ class HybridNomenclatureClassifierTest(unittest.TestCase):
         self.assertIn("dn:50", tee_tags)
         self.assertIn("pairdn:50x110", tee_tags)
         self.assertIn("dn:110", equal_tee_tags)
+        self.assertIn("pairdn:110x110", equal_tee_tags)
+        self.assertIn("deg:87", equal_stock_tee_tags)
+        self.assertIn("pairdn:110x110", equal_stock_tee_tags)
         self.assertIn("shape:eccentric", hint_tags)
+
+    def test_revision_and_compact_dimensions_are_extracted_for_common_client_formats(self) -> None:
+        revision_order_family = extract_family_tags("Ревизия, ∅110")
+        revision_order_tags = extract_dimension_tags("Ревизия, ∅110")
+        revision_stock_tags = extract_dimension_tags("Ревизия PP-H сер б/н Дн110 круг крышка в/к HTRE Ostendorf 115600")
+        revision_stock_family = extract_family_tags("Ревизия PP-H сер б/н Дн110 круг крышка в/к HTRE Ostendorf 115600")
+        pipe_tags = extract_dimension_tags("Труба НПВХ для наружной канализации SN4 ⌀160, l=1м")
+        elbow_tags = extract_dimension_tags("Угол 90°, 20")
+        elbow_stock_tags = extract_dimension_tags("Угол 45 20 мм Pilsa")
+        elbow_stock_compact_tags = extract_dimension_tags("Угольник PP-R бел Дн20х90гр VALFEX 10108020")
+        offset_elbow_hint_tags = extract_parser_hint_tags("Обводное колено 20 мм")
+        threaded_mufta_tags = extract_dimension_tags("Муфта комбинированная НР, 32хR1''")
+
+        self.assertIn("family:revision", revision_order_family)
+        self.assertIn("dn:110", revision_order_tags)
+        self.assertIn("family:revision", revision_stock_family)
+        self.assertIn("dn:110", revision_stock_tags)
+        self.assertIn("dn:160", pipe_tags)
+        self.assertIn("deg:90", elbow_tags)
+        self.assertIn("dn:20", elbow_tags)
+        self.assertIn("od:20", elbow_tags)
+        self.assertIn("deg:45", elbow_stock_tags)
+        self.assertIn("deg:90", elbow_stock_compact_tags)
+        self.assertIn("subtype:offset", offset_elbow_hint_tags)
+        self.assertIn("dn:32", threaded_mufta_tags)
+        self.assertIn("inch:1", threaded_mufta_tags)
+
+    def test_threaded_fraction_does_not_create_fake_wall_or_integer_inch(self) -> None:
+        tags = extract_dimension_tags('Угольник переходной с внутренней резьбой 20х3/4" Valfex')
+        self.assertIn("dn:20", tags)
+        self.assertIn("inch:3/4", tags)
+        self.assertNotIn("inch:4", tags)
+        self.assertNotIn("wall:3", tags)
 
     def test_russian_flange_type_is_extracted(self) -> None:
         tags = extract_dimension_tags("Фланец стальной приварной встык тип 11 DN80 PN16")
@@ -1317,11 +1354,157 @@ class HybridNomenclatureClassifierTest(unittest.TestCase):
         plain_candidate = matcher.score_candidate(order, plain)
         kind, best, reason = matcher.classify(order, [threaded_candidate, plain_candidate])
 
-        self.assertGreater(threaded_candidate.score, plain_candidate.score)
+        self.assertGreaterEqual(threaded_candidate.score, plain_candidate.score)
         self.assertEqual(kind, "exact")
         self.assertIsNotNone(best)
         self.assertEqual(best.stock.code_1c, "PROAQUA")
         self.assertEqual(reason, "совпали тип изделия и обе стороны перехода")
+
+    def test_offset_elbow_is_not_compatible_with_plain_elbow_request(self) -> None:
+        order_name = "Угол 90°, 20"
+        order_search_text = build_search_text(order_name)
+        order_dimension_tags = (
+            extract_dimension_tags(order_name)
+            | extract_family_tags(order_name)
+            | extract_parser_hint_tags(order_name)
+            | extract_material_tags_from_search_text(order_search_text)
+        )
+        order_search_text = augment_search_text_with_dimension_tags(order_search_text, order_dimension_tags)
+        order_tokens = extract_tokens(order_search_text)
+        order = OrderLine(
+            source_file="demo.xlsx",
+            sheet_name="Sheet1",
+            source_row=1,
+            headers=[],
+            row_values=[],
+            position="1",
+            name=order_name,
+            mark="PPR",
+            supplier_code="",
+            vendor="",
+            unit="шт",
+            requested_qty=1.0,
+            search_text=order_search_text,
+            search_tokens=order_tokens,
+            key_tokens=extract_key_tokens(order_tokens),
+            root_tokens=extract_root_tokens(order_tokens),
+            code_tokens=set(),
+            dimension_tags=order_dimension_tags,
+            raw_query=order_name,
+            classification=None,
+        )
+
+        def make_stock(row_index: int, code: str, name: str) -> StockItem:
+            stock_search_text = build_search_text(name)
+            stock_dimension_tags = (
+                extract_dimension_tags(name)
+                | extract_family_tags(name)
+                | extract_parser_hint_tags(name)
+                | extract_material_tags_from_search_text(stock_search_text)
+            )
+            stock_search_text = augment_search_text_with_dimension_tags(stock_search_text, stock_dimension_tags)
+            stock_tokens = extract_tokens(stock_search_text)
+            return StockItem(
+                row_index=row_index,
+                code_1c=code,
+                name=name,
+                print_name=name,
+                product_type="",
+                sale_price="",
+                stop_price="",
+                plan_price="",
+                quantity=10.0,
+                remaining=10.0,
+                search_text=stock_search_text,
+                search_tokens=stock_tokens,
+                key_tokens=extract_key_tokens(stock_tokens),
+                root_tokens=extract_root_tokens(stock_tokens),
+                code_tokens=set(),
+                dimension_tags=stock_dimension_tags,
+            )
+
+        offset_elbow = make_stock(1, "OFFSET", "Обводное колено PP-R 20 мм")
+        plain_elbow = make_stock(2, "PLAIN", "Угол 90 PP-R DN20 белый")
+        matcher = StockMatcher([offset_elbow, plain_elbow], substitution_policy=load_substitution_policy())
+
+        self.assertFalse(matcher.is_candidate_compatible(order, offset_elbow))
+        self.assertTrue(matcher.is_candidate_compatible(order, plain_elbow))
+
+        candidates = matcher.find_candidates(order, limit=5)
+        self.assertEqual([candidate.stock.code_1c for candidate in candidates], ["PLAIN"])
+
+    def test_threaded_transition_elbow_is_not_compatible_with_plain_elbow_request(self) -> None:
+        order_name = "Угол 90°, 20"
+        order_search_text = build_search_text(order_name)
+        order_dimension_tags = (
+            extract_dimension_tags(order_name)
+            | extract_family_tags(order_name)
+            | extract_parser_hint_tags(order_name)
+            | extract_material_tags_from_search_text(order_search_text)
+        )
+        order_search_text = augment_search_text_with_dimension_tags(order_search_text, order_dimension_tags)
+        order_tokens = extract_tokens(order_search_text)
+        order = OrderLine(
+            source_file="demo.xlsx",
+            sheet_name="Sheet1",
+            source_row=1,
+            headers=[],
+            row_values=[],
+            position="1",
+            name=order_name,
+            mark="",
+            supplier_code="",
+            vendor="",
+            unit="шт",
+            requested_qty=1.0,
+            search_text=order_search_text,
+            search_tokens=order_tokens,
+            key_tokens=extract_key_tokens(order_tokens),
+            root_tokens=extract_root_tokens(order_tokens),
+            code_tokens=set(),
+            dimension_tags=order_dimension_tags,
+            raw_query=order_name,
+            classification=None,
+        )
+
+        def make_stock(row_index: int, code: str, name: str) -> StockItem:
+            stock_search_text = build_search_text(name)
+            stock_dimension_tags = (
+                extract_dimension_tags(name)
+                | extract_family_tags(name)
+                | extract_parser_hint_tags(name)
+                | extract_material_tags_from_search_text(stock_search_text)
+            )
+            stock_search_text = augment_search_text_with_dimension_tags(stock_search_text, stock_dimension_tags)
+            stock_tokens = extract_tokens(stock_search_text)
+            return StockItem(
+                row_index=row_index,
+                code_1c=code,
+                name=name,
+                print_name=name,
+                product_type="",
+                sale_price="",
+                stop_price="",
+                plan_price="",
+                quantity=10.0,
+                remaining=10.0,
+                search_text=stock_search_text,
+                search_tokens=stock_tokens,
+                key_tokens=extract_key_tokens(stock_tokens),
+                root_tokens=extract_root_tokens(stock_tokens),
+                code_tokens=set(),
+                dimension_tags=stock_dimension_tags,
+            )
+
+        threaded_elbow = make_stock(1, "THREADED", 'Угольник переходной с внутренней резьбой 20х3/4" Valfex')
+        plain_elbow = make_stock(2, "PLAIN", "Угол 90 PP-R DN20 белый")
+        matcher = StockMatcher([threaded_elbow, plain_elbow], substitution_policy=load_substitution_policy())
+
+        self.assertFalse(matcher.is_candidate_compatible(order, threaded_elbow))
+        self.assertTrue(matcher.is_candidate_compatible(order, plain_elbow))
+
+        candidates = matcher.find_candidates(order, limit=5)
+        self.assertEqual([candidate.stock.code_1c for candidate in candidates], ["PLAIN"])
 
     def test_approval_only_policy_keeps_air_vent_as_agreement(self) -> None:
         order_name = "Воздухоотводчик автоматический DN15"

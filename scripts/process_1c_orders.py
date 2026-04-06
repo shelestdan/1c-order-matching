@@ -34,6 +34,7 @@ from typing import Iterable, Mapping, Sequence
 import numpy as np
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from rapidfuzz import fuzz
 
 from nomenclature_classifier import ClassificationStatus, QueryClassification, load_default_classifier
 
@@ -344,6 +345,7 @@ FAMILY_PATTERNS = {
     "pozharka": ("pozharnyi",),
     "radiator": ("radiator", "registr"),
     "rezba": ("rezba",),
+    "revision": ("revizi", "prochistk"),
     "schetchik": ("schetchik", "vodomer", "rashodomer"),
     "sink": ("umyval", "moik"),
     "tee": ("troinik",),
@@ -443,6 +445,7 @@ PRIMARY_FAMILY_TAGS = {
     "pipe",
     "pozharka",
     "radiator",
+    "revision",
     "schetchik",
     "sink",
     "tee",
@@ -470,12 +473,17 @@ FAMILY_ANALOG_REASONS = {
     "manometer": "совпали семейство и ключевые параметры, нужна ручная проверка исполнения",
     "patrubok": "совпали семейство, подтип и DN",
     "pozharka": "совпали семейство и основные размеры, нужна ручная проверка",
+    "revision": "совпали семейство и DN, нужна ручная проверка исполнения",
     "schetchik": "совпали семейство и ключевые параметры счетчика, нужна ручная проверка",
     "chugun_fason": "совпали семейство и DN, нужна ручная проверка исполнения",
     "gearbox": "совпали семейство и ключевые параметры редуктора",
     "vozduhootvod": "совпали семейство и DN, нужна ручная проверка исполнения",
     "zatvor": "совпали семейство и ключевые размеры, нужна ручная проверка",
     "zadvizhka": "совпали семейство и DN, нужна ручная проверка исполнения",
+}
+
+FAMILY_SPECIFIC_SUBTYPE_VALUES: dict[str, set[str]] = {
+    "elbow": {"offset"},
 }
 
 DOMAIN_DICTIONARY_PATH = Path(__file__).resolve().parent.parent / "data" / "vgs2000_matching_dictionary.json"
@@ -964,6 +972,7 @@ def fix_mixed_script_token(token: str) -> str:
 def normalize_symbols(text: str) -> str:
     text = text.replace("\n", " ")
     text = text.replace("∅", " dn ")
+    text = text.replace("⌀", " dn ")
     text = text.replace("ø", " dn ")
     text = text.replace("Ø", " dn ")
     text = text.replace("½", "1/2").replace("¼", "1/4").replace("¾", "3/4")
@@ -1185,6 +1194,9 @@ def extract_parser_hint_tags(*parts: object) -> set[str]:
         tags.add("family:mufta")
         tags.add("extra_connection:union")
 
+    if "family:elbow" in (tags | family_tags) and re.search(r"\bобвод\w*\b", normalized):
+        tags.add("subtype:offset")
+
     if "valfex" in normalized and re.search(r"\b(?:бел\w*|ppr|pp-r)\b", normalized):
         if tags & {"family:mufta", "family:perehod", "family:tee", "family:elbow"}:
             tags.add("mclass:polypropylene")
@@ -1268,6 +1280,19 @@ def normalize_measure_value(value: str) -> str:
     if "." in cleaned:
         cleaned = cleaned.rstrip("0").rstrip(".")
     return cleaned
+
+
+def normalize_degree_value(value: str) -> str:
+    normalized = normalize_measure_value(value)
+    if normalized == "87.5":
+        return "87"
+    return normalized
+
+
+def add_degree_tag(tags: set[str], value: str) -> None:
+    normalized = normalize_degree_value(value)
+    if normalized:
+        tags.add(f"deg:{normalized}")
 
 
 def normalize_flange_face(value: str) -> str:
@@ -1614,6 +1639,17 @@ def normalize_fraction(value: str) -> str:
     return re.sub(r"\s+", "", value.replace(",", "."))
 
 
+def iter_explicit_inch_values(text: str) -> Iterable[str]:
+    pattern = re.compile(
+        r"(?<![0-9/])(?:r|g)?\s*([0-9]+\s+[0-9]+/[0-9]+|[0-9]+/[0-9]+|[0-9]+)"
+        r"(?=\s*(?:\"|''|'|inch|дюйм))"
+    )
+    for match in pattern.findall(text):
+        normalized = normalize_fraction(match)
+        if normalized in INCH_TO_DN:
+            yield normalized
+
+
 def normalize_pair_tag(left: str, right: str) -> str:
     left_value = left.replace(",", ".")
     right_value = right.replace(",", ".")
@@ -1631,6 +1667,8 @@ def extract_dimension_tags(*parts: object) -> set[str]:
     raw_text = normalize_symbols(" ".join(clean_text(part) for part in parts if clean_text(part))).lower()
     text = normalize_measure_text(*parts)
     search_text = build_search_text(*parts)
+    family_tags = extract_family_tags(*parts)
+    families = extract_tag_values(family_tags, "family:")
     text_without_grade_sizes = re.sub(
         r"\b(?:0[38]|12)\d?\s*[xхh]\s*\d{2}\s*[hn]\s*\d{2}(?:\s*[tm]\s*\d?)?\b",
         " ",
@@ -1639,13 +1677,23 @@ def extract_dimension_tags(*parts: object) -> set[str]:
     tags: set[str] = set()
     for match in re.findall(r"\bdn(?:\.|-)?\s*([0-9]+(?:[.,][0-9]+)?)", text):
         tags.add(f"dn:{match.replace(',', '.')}")
-    for match in re.findall(r"\b(?:du|dy|ду)\s*([0-9]+(?:[.,][0-9]+)?)\b", raw_text):
+    for match in re.findall(r"\bdn(?:\.|-)?\s*([0-9]+(?:[.,][0-9]+)?)", search_text):
         tags.add(f"dn:{match.replace(',', '.')}")
+    for match in re.findall(r"\bdn([0-9]{2,4})(?![0-9])", search_text):
+        tags.add(f"dn:{normalize_measure_value(match)}")
+    for match in re.findall(r"\b(?:du|dy|ду|дн)\s*([0-9]+(?:[.,][0-9]+)?)\b", raw_text):
+        tags.add(f"dn:{match.replace(',', '.')}")
+    for match in re.findall(r"\b(?:dn|дн)([0-9]{2,4})(?![0-9])", raw_text):
+        tags.add(f"dn:{normalize_measure_value(match)}")
     for match in re.findall(r"\bd(?!n)(?!u)(?!y)\s*([0-9]+(?:[.,][0-9]+)?)\b", text):
         normalized = match.replace(",", ".")
         tags.add(f"dn:{normalized}")
         if "." not in normalized:
             tags.add(f"od:{normalized}")
+    for match in re.findall(r"[⌀ø∅]\s*([0-9]+(?:[.,][0-9]+)?)", raw_text):
+        normalized = normalize_measure_value(match)
+        tags.add(f"dn:{normalized}")
+        tags.add(f"od:{normalized}")
     for match in re.findall(r"\b(?:pn|ru)(?:\.|-)?\s*([0-9]+(?:[.,][0-9]+)?)", text):
         tags.add(f"pn:{match.replace(',', '.')}")
     for match in re.findall(r"\bkvs\s*=?\s*([0-9]+(?:[.,][0-9]+)?)", text):
@@ -1662,25 +1710,27 @@ def extract_dimension_tags(*parts: object) -> set[str]:
         normalized = match.group(1).replace(",", ".")
         tags.add(f"dn:{normalized}")
         tags.add(f"od:{normalized}")
-    for match in re.findall(r"\b([0-9]+\s+[0-9]+/[0-9]+|[0-9]+/[0-9]+|[0-9]+)\s*(?:\"|''|'|inch|дюйм)", text):
-        normalized_inch = normalize_fraction(match)
-        if normalized_inch in INCH_TO_DN:
-            tags.add(f'inch:{normalized_inch}')
-    if any(marker in raw_text for marker in {'"', "''", "'", "дюйм"}):
-        for match in re.findall(r"\b([0-9]+\s+[0-9]+/[0-9]+|[0-9]+/[0-9]+|[0-9]+)\b", search_text):
-            normalized_inch = normalize_fraction(match)
-            if normalized_inch in INCH_TO_DN:
-                tags.add(f'inch:{normalized_inch}')
-    for match in re.findall(r"\b(15|30|45|60|87|90|120|180)\s*(?:deg|град|grad|-)", text):
-        tags.add(f"deg:{match}")
+    for inch_value in iter_explicit_inch_values(raw_text):
+        tags.add(f'inch:{inch_value}')
+    for match in re.findall(r"\b(15|30|45|60|87(?:[.,]5)?|90|120|180)\s*(?:deg|gr|гр|град|grad|-)", text):
+        add_degree_tag(tags, match)
+    for match in re.findall(r"(?:[xх/]|-)\s*(15|30|45|60|87(?:[.,]5)?|90|120|180)\s*(?:deg|gr|гр|град|grad)\b", text):
+        add_degree_tag(tags, match)
+    if "elbow" in families:
+        elbow_angle_match = re.search(
+            r"\b(?:ugolnik|ugol|otvod|koleno)\b[^0-9]{0,6}(15|30|45|60|87(?:[.,]5)?|90|120|180)\b",
+            search_text,
+        )
+        if elbow_angle_match:
+            add_degree_tag(tags, elbow_angle_match.group(1))
     for dn_value, deg_value in re.findall(
-        r"\b(?:dn|du|dy|ду)(?:\.|-)?\s*(\d{2,4})\s*/\s*(15|30|45|60|87|90|120|180)\b",
+        r"\b(?:dn|du|dy|ду|дн)(?:\.|-)?\s*(\d{2,4})\s*/\s*(15|30|45|60|87(?:[.,]5)?|90|120|180)\b",
         raw_text,
     ):
         tags.add(f"dn:{dn_value}")
-        tags.add(f"deg:{deg_value}")
+        add_degree_tag(tags, deg_value)
     for outer, wall in re.findall(
-        r"(?<![a-zа-я0-9])(\d{1,4}(?:[.,]\d+)?)\s*[xхh]\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9])",
+        r"(?<![a-zа-я0-9])(\d{1,4}(?:[.,]\d+)?)\s*[xхh]\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9/])",
         text_without_grade_sizes,
     ):
         normalized_outer = outer.replace(",", ".")
@@ -1705,8 +1755,8 @@ def extract_dimension_tags(*parts: object) -> set[str]:
         tags.add(f"mat:{match}")
     for match in re.findall(r"\b(?:gost|гост)\s*([0-9]{5})\b", text):
         tags.add(f"spec:{match}")
-    for match in re.findall(r"\b(15|30|45|60|87|90|120|180)\s*-\s*([12])\s*-\s*\d{2,4}\s*[xхh]", text):
-        tags.add(f"deg:{match[0]}")
+    for match in re.findall(r"\b(15|30|45|60|87(?:[.,]5)?|90|120|180)\s*-\s*([12])\s*-\s*\d{2,4}\s*[xхh]", text):
+        add_degree_tag(tags, match[0])
         tags.add(f"series:{match[1]}")
     for flange_type in re.findall(r"\b(?:tip|type|тип)\s*(01|11)\b", text):
         tags.add(f"type:{flange_type}")
@@ -1749,8 +1799,7 @@ def extract_dimension_tags(*parts: object) -> set[str]:
             normalized_right = normalize_measure_value(right)
             tags.add(f"dn:{normalized_left}")
             tags.add(f"dn:{normalized_right}")
-            if left != right:
-                tags.add(f"pairdn:{normalize_pair_tag(normalized_left, normalized_right)}")
+            tags.add(f"pairdn:{normalize_pair_tag(normalized_left, normalized_right)}")
     if re.search(r"\bpereh(?:od\w*)?\b", search_text):
         for left, right in re.findall(
             r"\b(?:dn|d)?\s*(\d{2,4})\s*(?:[xх/]|-)\s*(\d{2,4})\b",
@@ -1760,8 +1809,7 @@ def extract_dimension_tags(*parts: object) -> set[str]:
             normalized_right = normalize_measure_value(right)
             tags.add(f"dn:{normalized_left}")
             tags.add(f"dn:{normalized_right}")
-            if left != right:
-                tags.add(f"pairdn:{normalize_pair_tag(normalized_left, normalized_right)}")
+            tags.add(f"pairdn:{normalize_pair_tag(normalized_left, normalized_right)}")
         for left, right in re.findall(
             r"\b(\d{2,4}(?:[.,]\d+)?)\s*[xхh]\s*\d+(?:[.,]\d+)?\s*[-/]\s*"
             r"(\d{2,4}(?:[.,]\d+)?)\s*[xхh]\s*\d+(?:[.,]\d+)?\b",
@@ -1771,8 +1819,15 @@ def extract_dimension_tags(*parts: object) -> set[str]:
             normalized_right = normalize_measure_value(right)
             tags.add(f"dn:{normalized_left}")
             tags.add(f"dn:{normalized_right}")
-            if left != right:
-                tags.add(f"pairdn:{normalize_pair_tag(normalized_left, normalized_right)}")
+            tags.add(f"pairdn:{normalize_pair_tag(normalized_left, normalized_right)}")
+    for diameter, inch_value in re.findall(
+        r"\b(\d{2,4})\s*[xхh]\s*r?\s*([0-9]+\s+[0-9]+/[0-9]+|[0-9]+/[0-9]+|[0-9]+)\s*(?:\"|''|'|inch|дюйм)",
+        raw_text,
+    ):
+        tags.add(f"dn:{normalize_measure_value(diameter)}")
+        normalized_inch = normalize_fraction(inch_value)
+        if normalized_inch in INCH_TO_DN:
+            tags.add(f"inch:{normalized_inch}")
     if re.search(r"\b(?:kran|klapan|filtr|rezba|vozduhootvod|vozdnhootvod|zatvor|zadvizh)\b", search_text):
         for match in re.findall(r"\b[a-z0-9./]+-(15|20|25|32|40|50|65|80|100|125|150)\b", search_text):
             tags.add(f"dn:{match}")
@@ -1781,6 +1836,22 @@ def extract_dimension_tags(*parts: object) -> set[str]:
             tags.add(f"dn:{match}")
             if re.search(r"\b(?:truba|отвод|колено)\b", search_text):
                 tags.add(f"od:{match}")
+    degree_values = {normalize_degree_value(value) for value in extract_tag_values(tags, "deg:")}
+    numeric_tokens: list[str] = []
+    for token in search_text.split():
+        cleaned = token.strip(".,;:()[]{}")
+        if re.fullmatch(r"\d{2,4}(?:\.\d+)?", cleaned):
+            numeric_tokens.append(normalize_measure_value(cleaned))
+    if "dn:" not in "".join(tags) and numeric_tokens:
+        size_candidates = [
+            value for value in numeric_tokens
+            if value not in degree_values and 10.0 <= float(value) <= 400.0
+        ]
+        if size_candidates and families & {"elbow", "pipe", "revision", "zaglushka"}:
+            primary_size = size_candidates[-1] if "elbow" in families else size_candidates[0]
+            tags.add(f"dn:{primary_size}")
+            if families & {"elbow", "pipe"}:
+                tags.add(f"od:{primary_size}")
 
     if re.search(r"\b(?:vgp|vodogazoprovod|3262)\b", search_text):
         dn_values = extract_tag_values(tags, "dn:")
@@ -2104,12 +2175,7 @@ def safe_overlap(left: set[str], right: set[str]) -> float:
 def token_set_ratio(left: Sequence[str], right: Sequence[str]) -> float:
     if not left or not right:
         return 0.0
-    left_set = set(left)
-    right_set = set(right)
-    intersection = left_set & right_set
-    if not intersection:
-        return 0.0
-    return 100.0 * (2 * len(intersection)) / (len(left_set) + len(right_set))
+    return float(fuzz.token_set_ratio(" ".join(sorted(set(left))), " ".join(sorted(set(right)))))
 
 
 def ordered_subsequence_ratio(query: str, candidate: str) -> float:
@@ -2135,7 +2201,43 @@ def ordered_subsequence_ratio(query: str, candidate: str) -> float:
             continue
         current_index = next_position
         matches += 1
-    return 100.0 * matches / len(query_tokens)
+    subsequence_score = 100.0 * matches / len(query_tokens)
+    partial_score = float(fuzz.partial_ratio(query, candidate))
+    return max(subsequence_score, partial_score)
+
+
+def fuzzy_rerank_bonus(query: str, candidate: str) -> tuple[float, list[str]]:
+    if not query or not candidate:
+        return 0.0, []
+    wratio = float(fuzz.WRatio(query, candidate))
+    token_sort = float(fuzz.token_sort_ratio(query, candidate))
+    partial = float(fuzz.partial_ratio(query, candidate))
+
+    bonus = 0.0
+    reasons: list[str] = []
+    if wratio >= 88.0:
+        bonus += 6.0
+        reasons.append("сильное fuzzy-совпадение текста")
+    elif wratio >= 80.0:
+        bonus += 4.0
+        reasons.append("хорошее fuzzy-совпадение текста")
+    elif wratio >= 72.0:
+        bonus += 2.5
+        reasons.append("fuzzy-поиск подтверждает текстовое сходство")
+
+    if partial >= 92.0:
+        bonus += 2.5
+        reasons.append("совпадает фрагмент названия")
+    elif partial >= 85.0:
+        bonus += 1.0
+        reasons.append("совпадает фрагмент названия")
+
+    if token_sort >= 92.0:
+        bonus += 1.5
+    elif token_sort >= 84.0:
+        bonus += 0.5
+
+    return min(8.0, bonus), list(dict.fromkeys(reasons))
 
 
 def load_stock(stock_path: Path, source_label: str = "") -> list[StockItem]:
@@ -2963,11 +3065,41 @@ class StockMatcher:
                 return False
         return True
 
+    def _has_compatible_family_specific_subtypes(self, order: OrderLine, stock: StockItem) -> bool:
+        order_families = extract_tag_values(order.dimension_tags, "family:")
+        stock_families = extract_tag_values(stock.dimension_tags, "family:")
+        if not order_families or not stock_families:
+            return True
+
+        order_subtypes = extract_tag_values(order.dimension_tags, "subtype:")
+        stock_subtypes = extract_tag_values(stock.dimension_tags, "subtype:")
+        for family, tracked_subtypes in FAMILY_SPECIFIC_SUBTYPE_VALUES.items():
+            if family not in order_families or family not in stock_families:
+                continue
+            if (order_subtypes & tracked_subtypes) != (stock_subtypes & tracked_subtypes):
+                return False
+
+        if "elbow" in order_families and "elbow" in stock_families:
+            order_is_transition_elbow = bool(
+                {"perehod", "mufta"} & order_families
+                or extract_tag_values(order.dimension_tags, "inch:")
+                or extract_tag_values(order.dimension_tags, "conn_gender:")
+            )
+            stock_is_transition_elbow = bool(
+                {"perehod", "mufta"} & stock_families
+                or extract_tag_values(stock.dimension_tags, "inch:")
+                or extract_tag_values(stock.dimension_tags, "conn_gender:")
+            )
+            if order_is_transition_elbow != stock_is_transition_elbow:
+                return False
+        return True
+
     def is_candidate_compatible(self, order: OrderLine, stock: StockItem) -> bool:
         return (
             self._has_compatible_families(order, stock)
             and self._has_compatible_materials(order, stock)
             and self._has_required_dimension_matches(order, stock)
+            and self._has_compatible_family_specific_subtypes(order, stock)
         )
 
     def filter_analog_candidates(self, candidates: Sequence[Candidate]) -> list[Candidate]:
@@ -3118,6 +3250,12 @@ class StockMatcher:
             score -= penalty
             if penalty >= 6:
                 reasons.append("не хватает ключевых слов")
+
+        if overlap >= 0.25 or soft_overlap >= 0.35 or dimension_bonus >= 10.0 or code_hit:
+            fuzzy_bonus, fuzzy_reasons = fuzzy_rerank_bonus(order.search_text, stock.search_text)
+            if fuzzy_bonus > 0.0:
+                score += fuzzy_bonus
+                reasons.extend(fuzzy_reasons)
 
         if stock.remaining <= 0:
             reasons.append("остаток уже исчерпан")
@@ -3280,7 +3418,9 @@ class StockMatcher:
                 continue
             current_index = positions[next_index]
             matches += 1
-        return 100.0 * matches / len(query_tokens)
+        subsequence_score = 100.0 * matches / len(query_tokens)
+        partial_score = float(fuzz.partial_ratio(order_query, candidate_text))
+        return max(subsequence_score, partial_score)
 
     def _build_candidate_from_arrays(
         self,
@@ -3319,6 +3459,14 @@ class StockMatcher:
             reasons.extend(flange_reasons)
         if missing_penalty[stock_index] >= 6.0:
             reasons.append("не хватает ключевых слов")
+        fuzzy_bonus, fuzzy_reasons = fuzzy_rerank_bonus(order.search_text, stock.search_text)
+        if fuzzy_bonus > 0.0 and (
+            overlap[stock_index] >= 0.25
+            or soft_overlap[stock_index] >= 0.35
+            or dimension_bonus[stock_index] >= 10.0
+            or code_hits[stock_index]
+        ):
+            reasons.extend(fuzzy_reasons)
         if stock.remaining <= 0:
             reasons.append("остаток уже исчерпан")
         return Candidate(
@@ -3350,7 +3498,7 @@ class StockMatcher:
                 ordered_bonus_upper = np.where(search_hits > 0, 15.0, 0.0)
         else:
             ordered_bonus_upper = np.zeros(len(self.stock_items), dtype=np.float64)
-        upper_bounds = np.clip(base_scores + ordered_bonus_upper, 0.0, 100.0)
+        upper_bounds = np.clip(base_scores + ordered_bonus_upper + 8.0, 0.0, 100.0)
         sorted_indices = np.argsort(upper_bounds)[::-1]
 
         target = max(limit, 1)
@@ -3370,6 +3518,14 @@ class StockMatcher:
             else:
                 ordered_ratio = self._ordered_subsequence_ratio_cached(order.search_text, query_tokens, stock_index)
                 final_score = float(np.clip(base_scores[stock_index] + 0.15 * ordered_ratio, 0.0, 100.0))
+            if (
+                overlap[stock_index] >= 0.25
+                or soft_overlap[stock_index] >= 0.35
+                or dimension_bonus[stock_index] >= 10.0
+                or code_hits[stock_index]
+            ):
+                fuzzy_bonus, _ = fuzzy_rerank_bonus(order.search_text, self.stock_items[stock_index].search_text)
+                final_score = float(np.clip(final_score + fuzzy_bonus, 0.0, 100.0))
 
             entry = self._candidate_sort_key_from_values(
                 stock_index,
