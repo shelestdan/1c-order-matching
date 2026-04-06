@@ -341,6 +341,33 @@ function esc(str) {
 /* ===== Analog Modal ===== */
 let modalRowId = null;
 
+function isGenericManualSearchMark(value) {
+  const mark = String(value || '').trim();
+  if (!mark) return true;
+  const upper = mark.toUpperCase();
+  if (['HT', 'KG', 'ST'].includes(upper)) return true;
+  return /^[A-ZА-Я]{1,3}$/.test(upper) && !/[0-9]/.test(upper);
+}
+
+function buildManualSearchPrefill(row) {
+  const name = String(row?.name || '').trim();
+  const mark = String(row?.mark || '').trim();
+  const matchedCode = String(row?.matched_code || '').trim();
+
+  if (name) {
+    if (mark && !isGenericManualSearchMark(mark) && !name.toLowerCase().includes(mark.toLowerCase())) {
+      return `${name} ${mark}`.trim().substring(0, 80);
+    }
+    if (matchedCode && /[0-9]/.test(matchedCode) && !name.toLowerCase().includes(matchedCode.toLowerCase())) {
+      return `${name} ${matchedCode}`.trim().substring(0, 80);
+    }
+    return name.substring(0, 80);
+  }
+
+  if (mark) return mark.substring(0, 80);
+  return matchedCode.substring(0, 80);
+}
+
 function openModal(rowId) {
   modalRowId = rowId;
   const row = allRows.find(r => r.id === rowId);
@@ -350,9 +377,7 @@ function openModal(rowId) {
     `${row.name}${row.mark ? ' · ' + row.mark : ''}${row.vendor ? ' · ' + row.vendor : ''}`;
 
   const searchInput = document.getElementById('manual-search-input');
-  // Pre-fill with mark/code if available, otherwise use name truncated to 60 chars
-  const prefill = row.mark || row.matched_code || '';
-  searchInput.value = prefill || (row.name || '').substring(0, 60);
+  searchInput.value = buildManualSearchPrefill(row);
 
   renderCandidateList('analog-list', row.analogs || [], rowId, 'analog');
   renderCandidateList('search-results-list', searchResultsByRow[rowId] || [], rowId, 'search');

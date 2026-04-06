@@ -194,6 +194,25 @@ class HybridNomenclatureClassifierTest(unittest.TestCase):
         self.assertIn("tripledn:20x25x25", order_tags)
         self.assertIn("tripledn:20x25x25", stock_tags)
 
+    def test_sewer_pair_dimensions_are_extracted_for_ht_and_kg_fittings(self) -> None:
+        order_tags = extract_dimension_tags("Переход эксцентрический, 110х50")
+        stock_tags = extract_dimension_tags("Переход PP-H эксц сер б/н Дн110х50 в/к HTR Ostendorf 115720")
+        tee_tags = extract_dimension_tags("Тройник 87°, 110х50")
+        equal_tee_tags = extract_dimension_tags("Тройник 45°, 110х110")
+        hint_tags = extract_parser_hint_tags("Переход PP-H эксц сер б/н Дн110х50")
+
+        self.assertIn("dn:110", order_tags)
+        self.assertIn("dn:50", order_tags)
+        self.assertIn("pairdn:50x110", order_tags)
+        self.assertIn("dn:110", stock_tags)
+        self.assertIn("dn:50", stock_tags)
+        self.assertIn("pairdn:50x110", stock_tags)
+        self.assertIn("dn:110", tee_tags)
+        self.assertIn("dn:50", tee_tags)
+        self.assertIn("pairdn:50x110", tee_tags)
+        self.assertIn("dn:110", equal_tee_tags)
+        self.assertIn("shape:eccentric", hint_tags)
+
     def test_russian_flange_type_is_extracted(self) -> None:
         tags = extract_dimension_tags("Фланец стальной приварной встык тип 11 DN80 PN16")
         self.assertIn("type:11", tags)

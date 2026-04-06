@@ -12,6 +12,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -36,8 +37,10 @@ from process_1c_orders import (
     DEFAULT_MANUAL_SELECTION_MEMORY_PATH,
     DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH,
     OrderLine,
+    PARSER_HINTS_PATH,
     STATUS_NOT_FOUND,
     StockMatcher,
+    SUBSTITUTION_POLICY_PATH,
     augment_search_text_with_dimension_tags,
     build_search_text,
     clone_stock_items,
@@ -94,6 +97,16 @@ _stock_cache: dict[str, Any] = {
 _matcher_cache: dict[str, Any] = {
     "fingerprint": None,
     "master_matcher": None,
+}
+
+_pipeline_result_cache: dict[str, Any] = {
+    "scope": None,
+    "entries": {},
+}
+
+_manual_search_cache: dict[str, Any] = {
+    "scope": None,
+    "entries": {},
 }
 
 # ---------------------------------------------------------------------------
@@ -199,6 +212,65 @@ def _path_fingerprint(path: Path) -> str:
         return "missing"
     stat = path.stat()
     return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def _cache_scope_fingerprint() -> str:
+    stock_files = _find_all_stock_files()
+    return "|".join(
+        (
+            _stock_fingerprint(stock_files),
+            f"manual:{_path_fingerprint(_manual_selection_memory_path())}",
+            f"reviewed:{_path_fingerprint(DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH)}",
+            f"policy:{_path_fingerprint(SUBSTITUTION_POLICY_PATH)}",
+            f"hints:{_path_fingerprint(PARSER_HINTS_PATH)}",
+        )
+    )
+
+
+def _ensure_request_caches() -> str:
+    scope = _cache_scope_fingerprint()
+    for cache in (_pipeline_result_cache, _manual_search_cache):
+        if cache["scope"] != scope:
+            cache["scope"] = scope
+            cache["entries"] = {}
+    return scope
+
+
+def _file_content_hash(path: Path) -> str:
+    digest = hashlib.sha1()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _pipeline_cache_key(upload_path: Path) -> str:
+    scope = _ensure_request_caches()
+    return f"{scope}|upload:{_file_content_hash(upload_path)}"
+
+
+def _manual_search_cache_key(row: dict[str, Any], query: str, limit: int) -> str:
+    scope = _ensure_request_caches()
+    row_payload = {
+        "name": row.get("name"),
+        "mark": row.get("mark"),
+        "vendor": row.get("vendor"),
+        "unit": row.get("unit"),
+        "requested_qty": row.get("requested_qty"),
+        "raw_query": row.get("raw_query"),
+        "search_text": row.get("search_text"),
+        "key_tokens": row.get("key_tokens"),
+        "root_tokens": row.get("root_tokens"),
+        "dimension_tags": row.get("dimension_tags"),
+    }
+    row_hash = hashlib.sha1(
+        json.dumps(row_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    normalized_query = " ".join(query.lower().split())
+    return f"{scope}|row:{row_hash}|query:{normalized_query}|limit:{limit}"
 
 
 def _load_cached_stock() -> tuple[list[Path], list[Any]]:
@@ -627,10 +699,16 @@ async def upload_file(file: UploadFile = File(...), authorization: str | None = 
     with open(upload_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    try:
-        result = _run_pipeline(upload_path, job_dir)
-    except Exception as exc:
-        raise HTTPException(500, f"Pipeline error: {exc}")
+    cache_key = _pipeline_cache_key(upload_path)
+    cached_result = _pipeline_result_cache["entries"].get(cache_key)
+    if cached_result is not None:
+        result = copy.deepcopy(cached_result)
+    else:
+        try:
+            result = _run_pipeline(upload_path, job_dir)
+        except Exception as exc:
+            raise HTTPException(500, f"Pipeline error: {exc}")
+        _pipeline_result_cache["entries"][cache_key] = copy.deepcopy(result)
 
     _jobs[job_id] = {
         "job_id": job_id,
@@ -639,6 +717,7 @@ async def upload_file(file: UploadFile = File(...), authorization: str | None = 
         "total_rows": result["total_rows"],
         "status_counts": result["status_counts"],
     }
+    _save_job(job_id, result)
 
     return {"job_id": job_id, "filename": file.filename, **result}
 
@@ -715,9 +794,22 @@ def search_stock_for_row(job_id: str, body: ManualSearchRequest, authorization: 
     if len(query) < 2:
         raise HTTPException(400, "Введите минимум 2 символа для поиска")
 
-    matcher = _load_cached_matcher().fork()
+    cache_key = _manual_search_cache_key(row, query, body.limit)
+    cached_results = _manual_search_cache["entries"].get(cache_key)
+    if cached_results is not None:
+        return {
+            "job_id": job_id,
+            "row_id": body.row_id,
+            "query": query,
+            "results": copy.deepcopy(cached_results),
+        }
+
+    # Manual search does not reserve stock, so the shared master matcher is safe
+    # and avoids cloning 46k stock rows on every "Найти" click.
+    matcher = _load_cached_matcher()
     candidates = _manual_search_candidates(matcher, row, query, limit=body.limit)
     results = [_serialize_candidate(candidate) for candidate in candidates]
+    _manual_search_cache["entries"][cache_key] = copy.deepcopy(results)
 
     return {
         "job_id": job_id,

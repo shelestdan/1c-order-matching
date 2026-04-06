@@ -1734,27 +1734,45 @@ def extract_dimension_tags(*parts: object) -> set[str]:
         tags.add("hole:8")
     if re.search(r"\b(?:troinik|tee)\b", search_text):
         for first, second, third in re.findall(
-            r"\b(?:dn|d)?\s*(15|20|25|32|40|50|65|80|100|125|150|200|250|300)\s*[xх/]\s*"
-            r"(15|20|25|32|40|50|65|80|100|125|150|200|250|300)\s*[xх/]\s*"
-            r"(15|20|25|32|40|50|65|80|100|125|150|200|250|300)\b",
+            r"\b(?:dn|d)?\s*(\d{2,4})\s*[xх/]\s*(\d{2,4})\s*[xх/]\s*(\d{2,4})\b",
             search_text,
         ):
-            tags.add(f"tripledn:{normalize_multi_measure_tag(first, second, third)}")
+            normalized_values = [normalize_measure_value(first), normalize_measure_value(second), normalize_measure_value(third)]
+            for value in normalized_values:
+                tags.add(f"dn:{value}")
+            tags.add(f"tripledn:{normalize_multi_measure_tag(*normalized_values)}")
+        for left, right in re.findall(
+            r"\b(?:dn|d)?\s*(\d{2,4})\s*(?:[xх/]|-)\s*(\d{2,4})\b",
+            search_text,
+        ):
+            normalized_left = normalize_measure_value(left)
+            normalized_right = normalize_measure_value(right)
+            tags.add(f"dn:{normalized_left}")
+            tags.add(f"dn:{normalized_right}")
+            if left != right:
+                tags.add(f"pairdn:{normalize_pair_tag(normalized_left, normalized_right)}")
     if re.search(r"\bpereh(?:od\w*)?\b", search_text):
         for left, right in re.findall(
-            r"\b(?:dn|d)?\s*(15|20|25|32|40|50|65|80|100|125|150|200|250|300)\s*(?:[xх/]|-)\s*"
-            r"(15|20|25|32|40|50|65|80|100|125|150|200|250|300)\b",
+            r"\b(?:dn|d)?\s*(\d{2,4})\s*(?:[xх/]|-)\s*(\d{2,4})\b",
             search_text,
         ):
+            normalized_left = normalize_measure_value(left)
+            normalized_right = normalize_measure_value(right)
+            tags.add(f"dn:{normalized_left}")
+            tags.add(f"dn:{normalized_right}")
             if left != right:
-                tags.add(f"pairdn:{normalize_pair_tag(left, right)}")
+                tags.add(f"pairdn:{normalize_pair_tag(normalized_left, normalized_right)}")
         for left, right in re.findall(
             r"\b(\d{2,4}(?:[.,]\d+)?)\s*[xхh]\s*\d+(?:[.,]\d+)?\s*[-/]\s*"
             r"(\d{2,4}(?:[.,]\d+)?)\s*[xхh]\s*\d+(?:[.,]\d+)?\b",
             text_without_grade_sizes,
         ):
+            normalized_left = normalize_measure_value(left)
+            normalized_right = normalize_measure_value(right)
+            tags.add(f"dn:{normalized_left}")
+            tags.add(f"dn:{normalized_right}")
             if left != right:
-                tags.add(f"pairdn:{normalize_pair_tag(left, right)}")
+                tags.add(f"pairdn:{normalize_pair_tag(normalized_left, normalized_right)}")
     if re.search(r"\b(?:kran|klapan|filtr|rezba|vozduhootvod|vozdnhootvod|zatvor|zadvizh)\b", search_text):
         for match in re.findall(r"\b[a-z0-9./]+-(15|20|25|32|40|50|65|80|100|125|150)\b", search_text):
             tags.add(f"dn:{match}")
