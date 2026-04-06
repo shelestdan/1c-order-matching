@@ -453,6 +453,10 @@ PRIMARY_FAMILY_TAGS = {
     "zaglushka",
 }
 
+NON_BLOCKING_FAMILY_TAGS = {
+    "rezba",
+}
+
 FAMILY_EXACT_REASONS = {
     "pipe": "совпали тип трубы, размер и ГОСТ",
     "tee": "совпали тип изделия и тройные размеры",
@@ -564,7 +568,13 @@ def _compile_parser_family_triggers(payload: Mapping[str, object]) -> dict[str, 
                 set_payload = raw_rule.get("set", {})
                 if not match_any or not isinstance(set_payload, Mapping):
                     continue
-                resolve_rules.append({"match_any": match_any, "set": dict(set_payload)})
+                resolve_rules.append(
+                    {
+                        "match_any": match_any,
+                        "set": dict(set_payload),
+                        "require_family_alias": bool(raw_rule.get("require_family_alias", False)),
+                    }
+                )
         compiled[family] = {"aliases": aliases, "resolve_rules": tuple(resolve_rules)}
     return compiled
 
@@ -1141,6 +1151,8 @@ def extract_parser_hint_tags(*parts: object) -> set[str]:
             match_any = resolve_rule.get("match_any", ())
             if not any(alias in normalized for alias in match_any):
                 continue
+            if bool(resolve_rule.get("require_family_alias", False)) and not matched_family_alias:
+                continue
             for key, value in resolve_rule.get("set", {}).items():
                 if value is None:
                     continue
@@ -1161,6 +1173,17 @@ def extract_parser_hint_tags(*parts: object) -> set[str]:
             normalized,
         ):
             tags.add("subtype:inner_outer")
+
+    if re.search(r"(?<![a-zа-я0-9])(fm|mf)(?![a-zа-я0-9])", normalized):
+        tags.add("conn_gender:fm")
+    if re.search(r"(?<![a-zа-я0-9])ff(?![a-zа-я0-9])", normalized):
+        tags.add("conn_gender:ff")
+    if re.search(r"(?<![a-zа-я0-9])mm(?![a-zа-я0-9])", normalized):
+        tags.add("conn_gender:mm")
+
+    if "американка" in normalized or "разъемное соединение" in normalized or "сгон разъемный" in normalized:
+        tags.add("family:mufta")
+        tags.add("extra_connection:union")
 
     if "valfex" in normalized and re.search(r"\b(?:бел\w*|ppr|pp-r)\b", normalized):
         if tags & {"family:mufta", "family:perehod", "family:tee", "family:elbow"}:
@@ -1261,6 +1284,14 @@ def expand_search_token_variants(token: str) -> list[str]:
         variants.append("vodogazoprovodnaya")
     elif token == "esh":
         variants.append("elektrosvarnaya")
+    elif token == "amerikanka":
+        variants.extend(["american_union", "union", "razemnoe", "soedinenie"])
+    elif token == "fm":
+        variants.append("female_male")
+    elif token == "ff":
+        variants.append("female_female")
+    elif token == "mm":
+        variants.append("male_male")
 
     standard_match = re.fullmatch(r"(?P<std>\d{5})(?:-(?P<year>\d{2,4}))?", token)
     if standard_match:
@@ -1597,11 +1628,15 @@ def extract_dimension_tags(*parts: object) -> set[str]:
         normalized = match.group(1).replace(",", ".")
         tags.add(f"dn:{normalized}")
         tags.add(f"od:{normalized}")
-    for match in re.findall(r"\b([0-9]+\s+[0-9]+/[0-9]+|[0-9]+/[0-9]+)\s*(?:\"|''|'|inch|дюйм)", text):
-        tags.add(f'inch:{normalize_fraction(match)}')
+    for match in re.findall(r"\b([0-9]+\s+[0-9]+/[0-9]+|[0-9]+/[0-9]+|[0-9]+)\s*(?:\"|''|'|inch|дюйм)", text):
+        normalized_inch = normalize_fraction(match)
+        if normalized_inch in INCH_TO_DN:
+            tags.add(f'inch:{normalized_inch}')
     if any(marker in raw_text for marker in {'"', "''", "'", "дюйм"}):
-        for match in re.findall(r"\b([0-9]+\s+[0-9]+/[0-9]+|[0-9]+/[0-9]+)\b", search_text):
-            tags.add(f'inch:{normalize_fraction(match)}')
+        for match in re.findall(r"\b([0-9]+\s+[0-9]+/[0-9]+|[0-9]+/[0-9]+|[0-9]+)\b", search_text):
+            normalized_inch = normalize_fraction(match)
+            if normalized_inch in INCH_TO_DN:
+                tags.add(f'inch:{normalized_inch}')
     for match in re.findall(r"\b(15|30|45|60|87|90|120|180)\s*(?:deg|град|grad|-)", text):
         tags.add(f"deg:{match}")
     for dn_value, deg_value in re.findall(
@@ -2229,6 +2264,22 @@ def iter_stock_rows_from_csv(stock_path: Path) -> Iterable[dict[str, object]]:
             yield row
 
 
+_WORKBOOK_COLUMN_MAP: dict[str, str] = {
+    "Код1с": "Код1с",
+    "КодТовра": "Код1с",
+    "Артикул": "Код1с",
+    "Номенклатура": "Номенклатура",
+    "НаименованиДляПечати": "НаименованиДляПечати",
+    "ТипПродукта": "ТипПродукта",
+    "ПродажнаяЦена": "ПродажнаяЦена",
+    "Цена": "ПродажнаяЦена",
+    "СтопЦена": "СтопЦена",
+    "ПлановаяЦена": "ПлановаяЦена",
+    "Остаток": "Остаток",
+    "Количество": "Остаток",
+}
+
+
 def iter_stock_rows_from_workbook(stock_path: Path) -> Iterable[dict[str, object]]:
     workbook = load_workbook(stock_path, data_only=True, read_only=True)
     sheet_name = "остатки" if "остатки" in workbook.sheetnames else workbook.sheetnames[0]
@@ -2239,20 +2290,14 @@ def iter_stock_rows_from_workbook(stock_path: Path) -> Iterable[dict[str, object
     except StopIteration:
         return
     headers = [clean_text(value) for value in raw_headers]
-    header_map = {
-        header: index
-        for index, header in enumerate(headers)
-        if header in {
-            "Код1с",
-            "Номенклатура",
-            "НаименованиДляПечати",
-            "ТипПродукта",
-            "ПродажнаяЦена",
-            "СтопЦена",
-            "ПлановаяЦена",
-            "Остаток",
-        }
-    }
+    # Map raw column names to internal names; first occurrence of each internal name wins.
+    header_map: dict[str, int] = {}
+    used_internal: set[str] = set()
+    for index, header in enumerate(headers):
+        internal = _WORKBOOK_COLUMN_MAP.get(header)
+        if internal and internal not in used_internal:
+            header_map[internal] = index
+            used_internal.add(internal)
     if "Номенклатура" not in header_map or "Остаток" not in header_map:
         raise ValueError(f"Workbook stock file {stock_path.name} does not contain required headers.")
 
@@ -2832,9 +2877,9 @@ class StockMatcher:
         if order_primary:
             if not stock_primary or not order_primary.issubset(stock_primary):
                 return False
-            order_modifiers = order_families - PRIMARY_FAMILY_TAGS
+            order_modifiers = (order_families - PRIMARY_FAMILY_TAGS) - NON_BLOCKING_FAMILY_TAGS
             return order_modifiers.issubset(stock_families)
-        return order_families.issubset(stock_families)
+        return (order_families - NON_BLOCKING_FAMILY_TAGS).issubset(stock_families)
 
     def _has_compatible_materials(self, order: OrderLine, stock: StockItem) -> bool:
         order_materials = extract_tag_values(order.dimension_tags, "mclass:")

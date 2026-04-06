@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "version": "1.1.0",
+    "version": "1.1.1",
     "generated_on": "2026-03-31",
     "description": "Parser hints для понимания клиентских запросов и спецификаций"
   },
@@ -92,7 +92,10 @@
       ],
       "american_union": [
         "американка",
-        "со сгоном"
+        "со сгоном",
+        "разъемное соединение",
+        "сгон разъемный",
+        "разъемный сгон"
       ],
       "grooved": [
         "грувлок",
@@ -294,6 +297,69 @@
             "set": {
               "family": "perehod",
               "subfamily": "coupling"
+            }
+          }
+        ]
+      },
+      "mufta": {
+        "aliases": [
+          "муфта",
+          "американка",
+          "разъемное соединение",
+          "сгон разъемный",
+          "разъемный сгон"
+        ],
+        "resolve_rules": [
+          {
+            "match_any": [
+              "американка",
+              "разъемное соединение",
+              "сгон разъемный",
+              "разъемный сгон"
+            ],
+            "set": {
+              "family": "mufta",
+              "subtype": "union",
+              "extra_connection": "union"
+            }
+          },
+          {
+            "match_any": [
+              "fm",
+              "вр-нр",
+              "вн-нар",
+              "внутренняя-наружная",
+              "внутренняя резьба/наружная резьба"
+            ],
+            "require_family_alias": true,
+            "set": {
+              "conn_gender": "fm"
+            }
+          },
+          {
+            "match_any": [
+              "ff",
+              "вр-вр",
+              "вн-вн",
+              "внутренняя-внутренняя",
+              "внутренняя резьба/внутренняя резьба"
+            ],
+            "require_family_alias": true,
+            "set": {
+              "conn_gender": "ff"
+            }
+          },
+          {
+            "match_any": [
+              "mm",
+              "нр-нр",
+              "нар-нар",
+              "наружная-наружная",
+              "наружная резьба/наружная резьба"
+            ],
+            "require_family_alias": true,
+            "set": {
+              "conn_gender": "mm"
             }
           }
         ]
@@ -699,6 +765,7 @@
               "g1/2",
               "1/2\""
             ],
+            "require_family_alias": true,
             "set": {
               "family": "manometr",
               "connection_guess": "1/2"
@@ -708,6 +775,7 @@
             "match_any": [
               "снизу"
             ],
+            "require_family_alias": true,
             "set": {
               "connection_position": "bottom"
             }
@@ -717,6 +785,7 @@
               "кл.1,5",
               "класс 1,5"
             ],
+            "require_family_alias": true,
             "set": {
               "accuracy_class": "1.5"
             }

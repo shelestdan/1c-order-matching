@@ -220,6 +220,92 @@ class HybridNomenclatureClassifierTest(unittest.TestCase):
         self.assertIn("connection_position:bottom", manometer_tags)
         self.assertIn("accuracy_class:1.5", manometer_tags)
 
+    def test_american_union_query_maps_to_mufta_without_false_manometer_tags(self) -> None:
+        tags = extract_parser_hint_tags('Разъемное соединение "американка" 1 1/2" внутренняя-наружная резьба')
+        self.assertIn("family:mufta", tags)
+        self.assertIn("extra_connection:union", tags)
+        self.assertIn("conn_gender:fm", tags)
+        self.assertNotIn("family:manometer", tags)
+        self.assertNotIn("connection_guess:1/2", tags)
+
+    def test_american_union_stock_keeps_real_inch_and_ignores_pack_ratio(self) -> None:
+        tags = extract_dimension_tags("Американка FM 1 1/2'', AQUALINK 20/5")
+        hint_tags = extract_parser_hint_tags("Американка FM 1 1/2'', AQUALINK 20/5")
+        self.assertIn("inch:11/2", tags)
+        self.assertNotIn("inch:20/5", tags)
+        self.assertIn("family:mufta", hint_tags)
+        self.assertIn("conn_gender:fm", hint_tags)
+
+    def test_integer_inch_size_is_extracted_for_union_fittings(self) -> None:
+        tags = extract_dimension_tags('Разъемное соединение "американка" 2" внутренняя-наружная резьба')
+        self.assertIn("inch:2", tags)
+
+    def test_rezba_family_tag_does_not_block_american_union_candidate(self) -> None:
+        order_name = 'Разъемное соединение "американка" 1 1/2" внутренняя-наружная резьба'
+        order_search_text = build_search_text(order_name)
+        order_dimension_tags = (
+            extract_dimension_tags(order_name)
+            | extract_family_tags(order_name)
+            | extract_parser_hint_tags(order_name)
+            | extract_material_tags_from_search_text(order_search_text)
+        )
+        order_search_text = augment_search_text_with_dimension_tags(order_search_text, order_dimension_tags)
+        order_tokens = extract_tokens(order_search_text)
+        order = OrderLine(
+            source_file="demo.xlsx",
+            sheet_name="Sheet1",
+            source_row=1,
+            headers=[],
+            row_values=[],
+            position="1",
+            name=order_name,
+            mark="",
+            supplier_code="",
+            vendor="",
+            unit="шт",
+            requested_qty=1.0,
+            search_text=order_search_text,
+            search_tokens=order_tokens,
+            key_tokens=extract_key_tokens(order_tokens),
+            root_tokens=extract_root_tokens(order_tokens),
+            code_tokens=set(),
+            dimension_tags=order_dimension_tags,
+            raw_query=order_name,
+            classification=None,
+        )
+
+        stock_name = "Американка FM 1 1/2'', AQUALINK 20/5"
+        stock_search_text = build_search_text(stock_name)
+        stock_dimension_tags = (
+            extract_dimension_tags(stock_name)
+            | extract_family_tags(stock_name)
+            | extract_parser_hint_tags(stock_name)
+            | extract_material_tags_from_search_text(stock_search_text)
+        )
+        stock_search_text = augment_search_text_with_dimension_tags(stock_search_text, stock_dimension_tags)
+        stock_tokens = extract_tokens(stock_search_text)
+        stock = StockItem(
+            row_index=1,
+            code_1c="02591",
+            name=stock_name,
+            print_name=stock_name,
+            product_type="",
+            sale_price="",
+            stop_price="",
+            plan_price="",
+            quantity=10.0,
+            remaining=10.0,
+            search_text=stock_search_text,
+            search_tokens=stock_tokens,
+            key_tokens=extract_key_tokens(stock_tokens),
+            root_tokens=extract_root_tokens(stock_tokens),
+            code_tokens=set(),
+            dimension_tags=stock_dimension_tags,
+        )
+
+        matcher = StockMatcher([stock])
+        self.assertTrue(matcher.is_candidate_compatible(order, stock))
+
     def test_gearbox_is_operator_for_zatvor_and_family_for_standalone_item(self) -> None:
         zatvor_tags = extract_parser_hint_tags("Затвор Ду500 Ру10/16 межфл., корпус-чугун, диск-чугун, редуктор")
         gearbox_tags = extract_parser_hint_tags("Редуктор F07 14х14 д/затв Ду125-150 четвертьоборотный Benarmo EURO")
@@ -500,6 +586,7 @@ class HybridNomenclatureClassifierTest(unittest.TestCase):
 
         self.assertGreaterEqual(score_exec2.score, score_exec1.score)
         self.assertIn("предпочтительное исполнение", " ".join(score_exec2.reasons))
+        self.assertIn("предпочтительный ряд 11-2", " ".join(score_exec2.reasons))
 
     def test_pipe_with_matching_size_and_gost_is_exact(self) -> None:
         order_name = "Труба стальная электросварная Ø57х3.5 ГОСТ 10704-91"
