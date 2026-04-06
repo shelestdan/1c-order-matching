@@ -14,8 +14,10 @@
     <div class="login-logo">1C Matching</div>
     <p class="login-subtitle">Сопоставление заявок с остатками</p>
     <form id="login-form">
+      <input type="text" id="login-username" placeholder="Логин (admin или фамилия латиницей)" autocomplete="username">
       <input type="password" id="login-password" placeholder="Пароль" autocomplete="current-password" required>
       <button type="submit" class="btn btn-primary btn-full">Войти</button>
+      <p class="login-hint">Менеджеры: anisovets, pavlova, vinogradova, kolosov, panov. Администратор: admin или пустой логин.</p>
       <p id="login-error" class="error-text"></p>
     </form>
   </div>
@@ -29,6 +31,8 @@
       <span class="header-logo">1C Matching</span>
     </div>
     <div class="header-right">
+      <span id="current-user-badge" class="current-user-badge"></span>
+      <button id="btn-analytics" class="btn btn-ghost" onclick="showAnalytics()" style="display:none">Аналитика</button>
       <button id="btn-history" class="btn btn-ghost" onclick="showHistory()">История</button>
       <button id="btn-logout" class="btn btn-ghost" onclick="logout()">Выйти</button>
     </div>
@@ -146,6 +150,29 @@
   <div id="history-section" class="section" style="display:none">
     <h2>История обработок</h2>
     <div id="history-list" class="history-list"></div>
+    <button class="btn btn-secondary" onclick="showUpload()">Назад</button>
+  </div>
+
+  <div id="analytics-section" class="section" style="display:none">
+    <h2>Статистика менеджеров</h2>
+    <div class="analytics-summary" id="analytics-summary"></div>
+
+    <div class="analytics-layout">
+      <div class="analytics-column">
+        <h3>По пользователям</h3>
+        <div id="analytics-users" class="analytics-users"></div>
+      </div>
+      <div class="analytics-column">
+        <h3>Сохранённые файлы</h3>
+        <div id="analytics-exports" class="analytics-exports"></div>
+      </div>
+    </div>
+
+    <div class="analytics-top">
+      <h3>Частые замены</h3>
+      <div id="analytics-top-replacements" class="analytics-top-replacements"></div>
+    </div>
+
     <button class="btn btn-secondary" onclick="showUpload()">Назад</button>
   </div>
 </div>

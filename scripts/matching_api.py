@@ -68,12 +68,16 @@ from process_1c_orders import (
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 STOCK_DIR = Path(__file__).resolve().parent.parent / "inputs" / "stock"
 JOBS_DIR = Path(__file__).resolve().parent.parent / "outputs" / "web_jobs"
+DEFAULT_USER_DIRECTORY_PATH = DATA_DIR / "users.json"
+DEFAULT_EXPORT_AUDIT_PATH = DATA_DIR / "export_activity_log.json"
 
 # Simple shared password — override via env var MATCHING_PASSWORD
 SHARED_PASSWORD = os.environ.get("MATCHING_PASSWORD", "demo2026")
+ADMIN_USERNAME = os.environ.get("MATCHING_ADMIN_USERNAME", "admin").strip().lower() or "admin"
+ADMIN_DISPLAY_NAME = os.environ.get("MATCHING_ADMIN_DISPLAY_NAME", "Администратор").strip() or "Администратор"
 
-# Active sessions (token -> expiry timestamp)
-_sessions: dict[str, float] = {}
+# Active sessions (token -> session info)
+_sessions: dict[str, "SessionInfo"] = {}
 
 SESSION_TTL = 60 * 60 * 8  # 8 hours
 MANUAL_SEARCH_LIMIT = 12
@@ -128,23 +132,142 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 
-def _check_auth(authorization: str | None) -> None:
+@dataclass(frozen=True)
+class AuthUser:
+    username: str
+    display_name: str
+    role: str
+
+
+@dataclass
+class SessionInfo:
+    user: AuthUser
+    expires_at: float
+
+
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _user_directory_path() -> Path:
+    configured = os.environ.get("MATCHING_USERS_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return DEFAULT_USER_DIRECTORY_PATH
+
+
+def _export_audit_path() -> Path:
+    configured = os.environ.get("EXPORT_AUDIT_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return DEFAULT_EXPORT_AUDIT_PATH
+
+
+def _serialize_user(user: AuthUser) -> dict[str, Any]:
+    return {
+        "username": user.username,
+        "display_name": user.display_name,
+        "role": user.role,
+        "is_admin": user.role == "admin",
+    }
+
+
+def _load_user_directory(path: Path | None = None) -> dict[str, dict[str, str]]:
+    target = path or _user_directory_path()
+    if not target.exists():
+        return {}
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    users_payload = payload.get("users", [])
+    if not isinstance(users_payload, list):
+        return {}
+    users: dict[str, dict[str, str]] = {}
+    for raw_user in users_payload:
+        if not isinstance(raw_user, dict):
+            continue
+        username = str(raw_user.get("username") or "").strip().lower()
+        display_name = str(raw_user.get("display_name") or username).strip()
+        role = str(raw_user.get("role") or "manager").strip().lower() or "manager"
+        password_sha256 = str(raw_user.get("password_sha256") or "").strip().lower()
+        if not username or not display_name or not password_sha256:
+            continue
+        users[username] = {
+            "username": username,
+            "display_name": display_name,
+            "role": role,
+            "password_sha256": password_sha256,
+        }
+    return users
+
+
+def _authenticate_user(username: str, password: str, user_directory: dict[str, dict[str, str]] | None = None) -> AuthUser:
+    normalized_username = str(username or "").strip().lower()
+    if (not normalized_username or normalized_username == ADMIN_USERNAME) and password == SHARED_PASSWORD:
+        return AuthUser(username=ADMIN_USERNAME, display_name=ADMIN_DISPLAY_NAME, role="admin")
+
+    users = user_directory if user_directory is not None else _load_user_directory()
+    user = users.get(normalized_username)
+    if not user:
+        raise HTTPException(403, "Wrong username or password")
+    if _hash_password(password) != user.get("password_sha256"):
+        raise HTTPException(403, "Wrong username or password")
+    return AuthUser(
+        username=user["username"],
+        display_name=user["display_name"],
+        role=user.get("role", "manager"),
+    )
+
+
+def _check_auth(authorization: str | None) -> AuthUser:
     if not authorization:
         raise HTTPException(401, "Authorization header required")
     token = authorization.removeprefix("Bearer ").strip()
-    expiry = _sessions.get(token)
-    if not expiry or expiry < time.time():
+    session = _sessions.get(token)
+    if not session or session.expires_at < time.time():
         _sessions.pop(token, None)
         raise HTTPException(401, "Session expired or invalid")
+    return session.user
+
+
+def _require_admin(user: AuthUser) -> None:
+    if user.role != "admin":
+        raise HTTPException(403, "Admin access required")
+
+
+def _iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _job_owner_username(data: dict[str, Any]) -> str:
+    return str(data.get("created_by") or "").strip().lower()
+
+
+def _ensure_job_access(user: AuthUser, data: dict[str, Any]) -> None:
+    if user.role == "admin":
+        return
+    owner = _job_owner_username(data)
+    if not owner or owner != user.username:
+        raise HTTPException(403, "No access to this job")
 
 
 class LoginRequest(BaseModel):
+    username: str = ""
     password: str
+
+
+class UserResponse(BaseModel):
+    username: str
+    display_name: str
+    role: str
+    is_admin: bool
 
 
 class LoginResponse(BaseModel):
     token: str
     expires_in: int
+    user: UserResponse
 
 
 @app.get("/api/health")
@@ -152,13 +275,18 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/me", response_model=UserResponse)
+def me(authorization: str | None = Header(None)):
+    user = _check_auth(authorization)
+    return UserResponse(**_serialize_user(user))
+
+
 @app.post("/api/login", response_model=LoginResponse)
 def login(body: LoginRequest):
-    if body.password != SHARED_PASSWORD:
-        raise HTTPException(403, "Wrong password")
+    user = _authenticate_user(body.username, body.password)
     token = secrets.token_urlsafe(32)
-    _sessions[token] = time.time() + SESSION_TTL
-    return LoginResponse(token=token, expires_in=SESSION_TTL)
+    _sessions[token] = SessionInfo(user=user, expires_at=time.time() + SESSION_TTL)
+    return LoginResponse(token=token, expires_in=SESSION_TTL, user=UserResponse(**_serialize_user(user)))
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +713,277 @@ def _save_job(job_id: str, data: dict[str, Any]) -> None:
     result_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _build_job_summary(job_id: str, data: dict[str, Any], created_at: float) -> dict[str, Any]:
+    replacements_count = sum(1 for row in data.get("rows", []) if row.get("approved_analog"))
+    return {
+        "job_id": job_id,
+        "filename": data.get("filename") or job_id,
+        "created_at": float(data.get("created_at") or created_at),
+        "created_by": data.get("created_by") or "",
+        "created_by_display": data.get("created_by_display") or "",
+        "saved_at": data.get("saved_at"),
+        "saved_by": data.get("saved_by") or "",
+        "saved_by_display": data.get("saved_by_display") or "",
+        "total_rows": int(data.get("total_rows", 0) or 0),
+        "status_counts": data.get("status_counts", {}),
+        "replacements_count": replacements_count,
+        "learning_saved_count": int(data.get("learning_saved_count", 0) or 0),
+        "export_count": int(data.get("export_count", 0) or 0),
+    }
+
+
+def _load_export_audit_payload(path: Path | None = None) -> dict[str, Any]:
+    target = path or _export_audit_path()
+    if not target.exists():
+        return {
+            "version": 1,
+            "updated_at": "",
+            "event_count": 0,
+            "exports": [],
+        }
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "version": 1,
+            "updated_at": "",
+            "event_count": 0,
+            "exports": [],
+        }
+    if not isinstance(payload.get("exports"), list):
+        payload["exports"] = []
+    payload["version"] = int(payload.get("version", 1) or 1)
+    payload["updated_at"] = str(payload.get("updated_at", ""))
+    payload["event_count"] = len(payload["exports"])
+    return payload
+
+
+def _save_export_audit_payload(payload: dict[str, Any], path: Path | None = None) -> None:
+    target = path or _export_audit_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target.with_suffix(f"{target.suffix}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(target)
+
+
+def _build_export_audit_event(
+    *,
+    job_id: str,
+    data: dict[str, Any],
+    user: AuthUser,
+    learning_saved_count: int,
+) -> dict[str, Any]:
+    export_sequence = int(data.get("export_count", 0) or 0)
+    saved_at = str(data.get("saved_at") or _iso_now())
+    replacements: list[dict[str, Any]] = []
+    manual_search_replacements = 0
+    learned_replacements = 0
+    for row in data.get("rows", []):
+        approved = row.get("approved_analog")
+        if not isinstance(approved, dict):
+            continue
+        selected_via = str(row.get("selected_via") or "")
+        initial_status = str(row.get("initial_status") or "")
+        learned = selected_via == "manual_search" and initial_status == STATUS_NOT_FOUND
+        if selected_via == "manual_search":
+            manual_search_replacements += 1
+        if learned:
+            learned_replacements += 1
+        replacements.append(
+            {
+                "row_id": row.get("id"),
+                "position": row.get("position"),
+                "name": row.get("name"),
+                "mark": row.get("mark"),
+                "vendor": row.get("vendor"),
+                "requested_qty": row.get("requested_qty"),
+                "initial_status": initial_status,
+                "final_status": row.get("status"),
+                "selected_via": selected_via,
+                "selection_search_query": row.get("selection_search_query") or "",
+                "selected_by": row.get("selected_by") or user.username,
+                "selected_by_display": row.get("selected_by_display") or user.display_name,
+                "selected_at": row.get("selected_at") or saved_at,
+                "candidate_code": approved.get("code_1c") or "",
+                "candidate_name": approved.get("name") or "",
+                "candidate_source_label": approved.get("source_label") or "",
+                "candidate_score": approved.get("score"),
+                "manager_choice": bool(approved.get("manager_choice")),
+                "reasons": list(approved.get("reasons") or []),
+                "learned_on_export": learned,
+            }
+        )
+    return {
+        "export_event_id": f"{job_id}:export:{export_sequence}",
+        "job_id": job_id,
+        "filename": data.get("filename") or job_id,
+        "saved_at": saved_at,
+        "saved_by": user.username,
+        "saved_by_display": user.display_name,
+        "saved_by_role": user.role,
+        "total_rows": int(data.get("total_rows", 0) or 0),
+        "status_counts": data.get("status_counts", {}),
+        "replacement_count": len(replacements),
+        "manual_search_replacement_count": manual_search_replacements,
+        "learned_replacement_count": learned_replacements,
+        "learning_saved_count": learning_saved_count,
+        "replacements": replacements,
+    }
+
+
+def _append_export_audit_event(job_id: str, data: dict[str, Any], user: AuthUser, learning_saved_count: int) -> dict[str, Any]:
+    payload = _load_export_audit_payload()
+    event = _build_export_audit_event(
+        job_id=job_id,
+        data=data,
+        user=user,
+        learning_saved_count=learning_saved_count,
+    )
+    payload["exports"] = [entry for entry in payload.get("exports", []) if entry.get("export_event_id") != event["export_event_id"]]
+    payload["exports"].append(event)
+    payload["event_count"] = len(payload["exports"])
+    payload["updated_at"] = _iso_now()
+    _save_export_audit_payload(payload)
+    return event
+
+
+def _build_admin_analytics(payload: dict[str, Any], users: dict[str, dict[str, str]]) -> dict[str, Any]:
+    exports = sorted(
+        [entry for entry in payload.get("exports", []) if isinstance(entry, dict)],
+        key=lambda item: str(item.get("saved_at") or ""),
+        reverse=True,
+    )
+    summary = {
+        "saved_files": len(exports),
+        "unique_jobs": len({entry.get("job_id") for entry in exports if entry.get("job_id")}),
+        "total_rows": sum(int(entry.get("total_rows", 0) or 0) for entry in exports),
+        "replacement_count": sum(int(entry.get("replacement_count", 0) or 0) for entry in exports),
+        "manual_search_replacement_count": sum(int(entry.get("manual_search_replacement_count", 0) or 0) for entry in exports),
+        "learned_replacement_count": sum(int(entry.get("learned_replacement_count", 0) or 0) for entry in exports),
+        "users_with_exports": len({entry.get("saved_by") for entry in exports if entry.get("saved_by")}),
+    }
+
+    user_stats: dict[str, dict[str, Any]] = {}
+    for username, raw_user in users.items():
+        user_stats[username] = {
+            "username": username,
+            "display_name": raw_user.get("display_name") or username,
+            "role": raw_user.get("role") or "manager",
+            "saved_files": 0,
+            "unique_jobs": 0,
+            "total_rows": 0,
+            "replacement_count": 0,
+            "manual_search_replacement_count": 0,
+            "learned_replacement_count": 0,
+            "last_saved_at": "",
+            "files": [],
+            "_job_ids": set(),
+        }
+
+    replacement_popularity: dict[str, dict[str, Any]] = {}
+    for entry in exports:
+        username = str(entry.get("saved_by") or "").strip().lower()
+        if not username:
+            continue
+        stat = user_stats.setdefault(
+            username,
+            {
+                "username": username,
+                "display_name": entry.get("saved_by_display") or username,
+                "role": entry.get("saved_by_role") or "manager",
+                "saved_files": 0,
+                "unique_jobs": 0,
+                "total_rows": 0,
+                "replacement_count": 0,
+                "manual_search_replacement_count": 0,
+                "learned_replacement_count": 0,
+                "last_saved_at": "",
+                "files": [],
+                "_job_ids": set(),
+            },
+        )
+        stat["saved_files"] += 1
+        stat["total_rows"] += int(entry.get("total_rows", 0) or 0)
+        stat["replacement_count"] += int(entry.get("replacement_count", 0) or 0)
+        stat["manual_search_replacement_count"] += int(entry.get("manual_search_replacement_count", 0) or 0)
+        stat["learned_replacement_count"] += int(entry.get("learned_replacement_count", 0) or 0)
+        stat["last_saved_at"] = max(stat["last_saved_at"], str(entry.get("saved_at") or ""))
+        job_id = str(entry.get("job_id") or "")
+        if job_id:
+            stat["_job_ids"].add(job_id)
+        stat["files"].append(
+            {
+                "job_id": job_id,
+                "filename": entry.get("filename") or "",
+                "saved_at": entry.get("saved_at") or "",
+                "total_rows": int(entry.get("total_rows", 0) or 0),
+                "replacement_count": int(entry.get("replacement_count", 0) or 0),
+                "learned_replacement_count": int(entry.get("learned_replacement_count", 0) or 0),
+            }
+        )
+
+        for replacement in entry.get("replacements", []):
+            if not isinstance(replacement, dict):
+                continue
+            code = str(replacement.get("candidate_code") or "").strip()
+            name = str(replacement.get("candidate_name") or "").strip()
+            if not code or not name:
+                continue
+            item = replacement_popularity.setdefault(
+                code,
+                {
+                    "candidate_code": code,
+                    "candidate_name": name,
+                    "times_used": 0,
+                    "times_learned": 0,
+                    "last_used_at": "",
+                    "used_by": set(),
+                },
+            )
+            item["times_used"] += 1
+            if replacement.get("learned_on_export"):
+                item["times_learned"] += 1
+            item["last_used_at"] = max(item["last_used_at"], str(entry.get("saved_at") or ""))
+            item["used_by"].add(username)
+
+    prepared_users: list[dict[str, Any]] = []
+    for stat in user_stats.values():
+        stat["unique_jobs"] = len(stat.pop("_job_ids"))
+        stat["files"].sort(key=lambda item: item.get("saved_at") or "", reverse=True)
+        prepared_users.append(stat)
+    prepared_users.sort(
+        key=lambda item: (
+            int(item.get("saved_files", 0)),
+            int(item.get("replacement_count", 0)),
+            item.get("display_name") or item.get("username") or "",
+        ),
+        reverse=True,
+    )
+
+    top_replacements = sorted(
+        (
+            {
+                "candidate_code": item["candidate_code"],
+                "candidate_name": item["candidate_name"],
+                "times_used": item["times_used"],
+                "times_learned": item["times_learned"],
+                "last_used_at": item["last_used_at"],
+                "used_by_count": len(item["used_by"]),
+            }
+            for item in replacement_popularity.values()
+        ),
+        key=lambda item: (item["times_used"], item["times_learned"], item["candidate_name"]),
+        reverse=True,
+    )[:20]
+
+    return {
+        "summary": summary,
+        "users": prepared_users,
+        "exports": exports,
+        "top_replacements": top_replacements,
+    }
+
+
 def _load_manual_selection_payload(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {
@@ -657,7 +1056,7 @@ def _record_manual_selection_learning(
             "record_id": f"{job_id}:{row['id']}",
             "job_id": job_id,
             "row_id": row["id"],
-            "selected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "selected_at": row.get("selected_at") or _iso_now(),
             "query": query,
             "query_key": query_key,
             "order_key_tokens": key_tokens,
@@ -669,12 +1068,14 @@ def _record_manual_selection_learning(
             "candidate_name": str(candidate.get("name") or "").strip(),
             "candidate_source_label": str(candidate.get("source_label") or "").strip(),
             "selected_via": "manual_search",
+            "selected_by": str(row.get("selected_by") or "").strip(),
+            "selected_by_display": str(row.get("selected_by_display") or "").strip(),
         }
     )
 
     payload["entries"] = entries
     payload["entry_count"] = len(entries)
-    payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["updated_at"] = _iso_now()
     _save_manual_selection_payload(path, payload)
 
     _matcher_cache["fingerprint"] = None
@@ -689,7 +1090,7 @@ def _record_manual_selection_learning(
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...), authorization: str | None = Header(None)):
-    _check_auth(authorization)
+    user = _check_auth(authorization)
 
     job_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
     job_dir = ensure_output_dir(JOBS_DIR / job_id)
@@ -716,7 +1117,26 @@ async def upload_file(file: UploadFile = File(...), authorization: str | None = 
         "created_at": time.time(),
         "total_rows": result["total_rows"],
         "status_counts": result["status_counts"],
+        "created_by": user.username,
+        "created_by_display": user.display_name,
+        "saved_at": None,
+        "saved_by": "",
+        "saved_by_display": "",
+        "replacements_count": 0,
+        "learning_saved_count": 0,
+        "export_count": 0,
     }
+    result["job_id"] = job_id
+    result["filename"] = file.filename
+    result["created_at"] = _jobs[job_id]["created_at"]
+    result["created_by"] = user.username
+    result["created_by_display"] = user.display_name
+    result["created_by_role"] = user.role
+    result["saved_at"] = None
+    result["saved_by"] = ""
+    result["saved_by_display"] = ""
+    result["learning_saved_count"] = 0
+    result["export_count"] = 0
     _save_job(job_id, result)
 
     return {"job_id": job_id, "filename": file.filename, **result}
@@ -724,7 +1144,7 @@ async def upload_file(file: UploadFile = File(...), authorization: str | None = 
 
 @app.get("/api/jobs")
 def list_jobs(authorization: str | None = Header(None)):
-    _check_auth(authorization)
+    user = _check_auth(authorization)
     # Also scan disk for jobs not in memory
     if JOBS_DIR.exists():
         for d in sorted(JOBS_DIR.iterdir(), reverse=True):
@@ -732,20 +1152,21 @@ def list_jobs(authorization: str | None = Header(None)):
                 result_path = d / "result.json"
                 if result_path.exists():
                     data = json.loads(result_path.read_text(encoding="utf-8"))
-                    _jobs[d.name] = {
-                        "job_id": d.name,
-                        "filename": d.name,
-                        "created_at": d.stat().st_mtime,
-                        "total_rows": data.get("total_rows", 0),
-                        "status_counts": data.get("status_counts", {}),
-                    }
-    return {"jobs": sorted(_jobs.values(), key=lambda j: j["created_at"], reverse=True)}
+                    _jobs[d.name] = _build_job_summary(d.name, data, d.stat().st_mtime)
+    visible_jobs = [
+        job
+        for job in _jobs.values()
+        if user.role == "admin" or str(job.get("created_by") or "").strip().lower() == user.username
+    ]
+    return {"jobs": sorted(visible_jobs, key=lambda j: float(j.get("created_at") or 0), reverse=True)}
 
 
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str, authorization: str | None = Header(None)):
-    _check_auth(authorization)
-    return _load_job(job_id)
+    user = _check_auth(authorization)
+    data = _load_job(job_id)
+    _ensure_job_access(user, data)
+    return data
 
 
 class ApproveRequest(BaseModel):
@@ -754,8 +1175,9 @@ class ApproveRequest(BaseModel):
 
 @app.post("/api/jobs/{job_id}/approve")
 def approve_analogs(job_id: str, body: ApproveRequest, authorization: str | None = Header(None)):
-    _check_auth(authorization)
+    user = _check_auth(authorization)
     data = _load_job(job_id)
+    _ensure_job_access(user, data)
 
     approved_count = 0
     for row in data["rows"]:
@@ -768,6 +1190,9 @@ def approve_analogs(job_id: str, body: ApproveRequest, authorization: str | None
                     row["status"] = "Одобрена замена"
                     row["selected_via"] = "analog"
                     row["selection_search_query"] = ""
+                    row["selected_by"] = user.username
+                    row["selected_by_display"] = user.display_name
+                    row["selected_at"] = _iso_now()
                     approved_count += 1
                     break
 
@@ -787,8 +1212,9 @@ class ManualSearchRequest(BaseModel):
 
 @app.post("/api/jobs/{job_id}/search")
 def search_stock_for_row(job_id: str, body: ManualSearchRequest, authorization: str | None = Header(None)):
-    _check_auth(authorization)
+    user = _check_auth(authorization)
     data = _load_job(job_id)
+    _ensure_job_access(user, data)
     row = _find_row(data, body.row_id)
     query = body.query.strip()
     if len(query) < 2:
@@ -827,8 +1253,9 @@ class ManualSelectRequest(BaseModel):
 
 @app.post("/api/jobs/{job_id}/select")
 def select_manual_candidate(job_id: str, body: ManualSelectRequest, authorization: str | None = Header(None)):
-    _check_auth(authorization)
+    user = _check_auth(authorization)
     data = _load_job(job_id)
+    _ensure_job_access(user, data)
     row = _find_row(data, body.row_id)
     candidate = body.candidate
     code = str(candidate.get("code_1c") or "").strip()
@@ -852,6 +1279,9 @@ def select_manual_candidate(job_id: str, body: ManualSelectRequest, authorizatio
     row["status"] = "Одобрена замена"
     row["selected_via"] = "manual_search"
     row["selection_search_query"] = body.search_query.strip()
+    row["selected_by"] = user.username
+    row["selected_by_display"] = user.display_name
+    row["selected_at"] = _iso_now()
 
     analog_codes = {analog.get("code_1c") for analog in row.get("analogs", [])}
     if approved["code_1c"] not in analog_codes:
@@ -866,8 +1296,9 @@ def select_manual_candidate(job_id: str, body: ManualSelectRequest, authorizatio
 
 @app.post("/api/jobs/{job_id}/export")
 def export_1c_file(job_id: str, authorization: str | None = Header(None)):
-    _check_auth(authorization)
+    user = _check_auth(authorization)
     data = _load_job(job_id)
+    _ensure_job_access(user, data)
 
     import openpyxl
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -947,14 +1378,31 @@ def export_1c_file(job_id: str, authorization: str | None = Header(None)):
             search_query=str(row.get("selection_search_query") or ""),
         ):
             learning_saved_count += 1
-    if learning_saved_count:
-        _save_job(job_id, data)
+    data["saved_at"] = _iso_now()
+    data["saved_by"] = user.username
+    data["saved_by_display"] = user.display_name
+    data["learning_saved_count"] = learning_saved_count
+    data["export_count"] = int(data.get("export_count", 0) or 0) + 1
+    _save_job(job_id, data)
+    _jobs[job_id] = _build_job_summary(job_id, data, float(data.get("created_at") or time.time()))
+    _append_export_audit_event(job_id, data, user, learning_saved_count)
 
     return FileResponse(
         path=str(export_path),
         filename="КП_для_1С.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+@app.get("/api/admin/analytics")
+def admin_analytics(authorization: str | None = Header(None)):
+    user = _check_auth(authorization)
+    _require_admin(user)
+    payload = _load_export_audit_payload()
+    users = _load_user_directory()
+    analytics = _build_admin_analytics(payload, users)
+    analytics["generated_at"] = _iso_now()
+    return analytics
 
 
 # ---------------------------------------------------------------------------

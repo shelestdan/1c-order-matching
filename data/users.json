@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "users": [
+    {
+      "username": "anisovets",
+      "display_name": "Анисовец",
+      "role": "manager",
+      "password_sha256": "264abd655a95614665e046dba448240fc84983ce1d0995845f6d8cfe61ca1c17"
+    },
+    {
+      "username": "pavlova",
+      "display_name": "Павлова",
+      "role": "manager",
+      "password_sha256": "175bfb2b0cc8930c08df934e84602e296183596ffaa897d16fc86e3b68e91b9d"
+    },
+    {
+      "username": "vinogradova",
+      "display_name": "Виноградова",
+      "role": "manager",
+      "password_sha256": "162fda1c3929b763e2d86af726d2bffe63c88d66c327b6eb9bd69d6042c8aefb"
+    },
+    {
+      "username": "kolosov",
+      "display_name": "Колосов",
+      "role": "manager",
+      "password_sha256": "d952a1d5d2a2b0c4cfbefc090a24b7ffb59842fd857169a76602b439466bab0c"
+    },
+    {
+      "username": "panov",
+      "display_name": "Панов",
+      "role": "manager",
+      "password_sha256": "073d3b0fd9092432dbfdd7efd66912e0c736eb01c5d31e5583bfb244d1c3b047"
+    }
+  ]
+}

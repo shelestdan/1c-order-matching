@@ -4,17 +4,19 @@ const API = window.location.hostname.endsWith('github.io')
   ? 'https://1c-matching-api-production.up.railway.app'
   : '';
 let token = localStorage.getItem('auth_token') || '';
+let currentUser = JSON.parse(localStorage.getItem('auth_user') || 'null');
 let currentJob = null;
 let allRows = [];
 let currentFilter = 'all';
 let pendingApprovals = {};  // row_id -> analog code_1c
 let searchResultsByRow = {}; // row_id -> manual search results
 let selectionInFlightRows = new Set();
+let analyticsData = null;
 
 /* ===== Init ===== */
 document.addEventListener('DOMContentLoaded', () => {
   if (token) {
-    showApp();
+    restoreSession();
   } else {
     showScreen('login-screen');
   }
@@ -22,16 +24,19 @@ document.addEventListener('DOMContentLoaded', () => {
   // Login form
   document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
+    const username = document.getElementById('login-username').value.trim();
     const pw = document.getElementById('login-password').value;
     const err = document.getElementById('login-error');
     err.textContent = '';
     try {
-      const res = await apiFetch('/api/login', 'POST', { password: pw });
+      const res = await apiFetch('/api/login', 'POST', { username, password: pw });
       token = res.token;
+      currentUser = res.user;
       localStorage.setItem('auth_token', token);
+      localStorage.setItem('auth_user', JSON.stringify(currentUser));
       showApp();
     } catch (ex) {
-      err.textContent = ex.message || 'Неверный пароль';
+      err.textContent = ex.message || 'Неверный логин или пароль';
     }
   });
 
@@ -74,6 +79,7 @@ function showScreen(id) {
 }
 
 function showApp() {
+  updateUserUI();
   showScreen('app-screen');
   showUpload();
 }
@@ -83,6 +89,7 @@ function showUpload() {
   document.getElementById('progress-section').style.display = 'none';
   document.getElementById('results-section').style.display = 'none';
   document.getElementById('history-section').style.display = 'none';
+  document.getElementById('analytics-section').style.display = 'none';
   document.getElementById('file-input').value = '';
 }
 
@@ -90,13 +97,48 @@ function showHistory() {
   document.getElementById('upload-section').style.display = 'none';
   document.getElementById('results-section').style.display = 'none';
   document.getElementById('history-section').style.display = '';
+  document.getElementById('analytics-section').style.display = 'none';
   loadHistory();
+}
+
+function showAnalytics() {
+  document.getElementById('upload-section').style.display = 'none';
+  document.getElementById('results-section').style.display = 'none';
+  document.getElementById('history-section').style.display = 'none';
+  document.getElementById('analytics-section').style.display = '';
+  loadAnalytics();
 }
 
 function logout() {
   token = '';
+  currentUser = null;
   localStorage.removeItem('auth_token');
+  localStorage.removeItem('auth_user');
   showScreen('login-screen');
+}
+
+async function restoreSession() {
+  try {
+    const me = await apiFetch('/api/me');
+    currentUser = me;
+    localStorage.setItem('auth_user', JSON.stringify(currentUser));
+    showApp();
+  } catch (ex) {
+    logout();
+  }
+}
+
+function updateUserUI() {
+  const badge = document.getElementById('current-user-badge');
+  const analyticsButton = document.getElementById('btn-analytics');
+  if (!currentUser) {
+    badge.textContent = '';
+    analyticsButton.style.display = 'none';
+    return;
+  }
+  const roleLabel = currentUser.is_admin ? 'Админ' : 'Менеджер';
+  badge.textContent = `${currentUser.display_name} · ${roleLabel}`;
+  analyticsButton.style.display = currentUser.is_admin ? '' : 'none';
 }
 
 /* ===== API helper ===== */
@@ -114,7 +156,9 @@ async function apiFetch(path, method = 'GET', body = null) {
   const res = await fetch(API + path, opts);
   if (res.status === 401) {
     token = '';
+    currentUser = null;
     localStorage.removeItem('auth_token');
+    localStorage.removeItem('auth_user');
     showScreen('login-screen');
     throw new Error('Сессия истекла');
   }
@@ -567,6 +611,11 @@ async function exportFile() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+
+    const updated = await apiFetch(`/api/jobs/${currentJob.job_id}`);
+    currentJob = { ...updated, job_id: currentJob.job_id };
+    allRows = updated.rows || [];
+    renderResults(currentJob);
   } catch (ex) {
     alert('Ошибка экспорта: ' + ex.message);
   }
@@ -594,6 +643,12 @@ async function loadHistory() {
       const date = job.created_at
         ? new Date(job.created_at * 1000).toLocaleString('ru-RU')
         : '';
+      const savedAt = job.saved_at ? new Date(job.saved_at).toLocaleString('ru-RU') : '';
+      const ownerLabel = job.created_by_display ? `<div class="history-owner">${esc(job.created_by_display)}</div>` : '';
+      const savedLabel = savedAt ? `<div class="history-saved">Сохранён: ${savedAt}</div>` : '';
+      const replacementsLabel = job.replacements_count
+        ? `<span style="color:var(--approved)">замены ${job.replacements_count}</span>`
+        : '';
 
       const item = document.createElement('div');
       item.className = 'history-item';
@@ -601,11 +656,14 @@ async function loadHistory() {
         <div>
           <div class="history-name">${esc(job.filename || job.job_id)}</div>
           <div class="history-date">${date}</div>
+          ${ownerLabel}
+          ${savedLabel}
         </div>
         <div class="history-stats">
           <span style="color:var(--exact)">✓ ${exactN}</span>
           <span style="color:var(--approval)">~ ${analogN}</span>
           <span style="color:var(--notfound)">✗ ${notfoundN}</span>
+          ${replacementsLabel}
           <span style="color:var(--text-muted)">${job.total_rows} позиций</span>
         </div>
       `;
@@ -633,4 +691,119 @@ async function openHistoryJob(jobId) {
     document.getElementById('progress-text').textContent = 'Ошибка';
     document.getElementById('progress-detail').textContent = ex.message;
   }
+}
+
+async function loadAnalytics() {
+  const summary = document.getElementById('analytics-summary');
+  const users = document.getElementById('analytics-users');
+  const exports = document.getElementById('analytics-exports');
+  const topReplacements = document.getElementById('analytics-top-replacements');
+
+  summary.innerHTML = '<div class="empty-state">Загрузка аналитики...</div>';
+  users.innerHTML = '';
+  exports.innerHTML = '';
+  topReplacements.innerHTML = '';
+
+  try {
+    analyticsData = await apiFetch('/api/admin/analytics');
+    renderAnalytics(analyticsData);
+  } catch (ex) {
+    summary.innerHTML = `<div class="empty-state">${esc(ex.message || 'Ошибка загрузки аналитики')}</div>`;
+  }
+}
+
+function analyticsSummaryCard(label, value, accent = '') {
+  return `
+    <div class="analytics-card ${accent}">
+      <span class="analytics-card-value">${value}</span>
+      <span class="analytics-card-label">${label}</span>
+    </div>
+  `;
+}
+
+function renderAnalytics(data) {
+  const summary = data.summary || {};
+  document.getElementById('analytics-summary').innerHTML = [
+    analyticsSummaryCard('Сохранённых файлов', summary.saved_files || 0, 'is-primary'),
+    analyticsSummaryCard('Пользователей с выгрузками', summary.users_with_exports || 0),
+    analyticsSummaryCard('Всего замен', summary.replacement_count || 0),
+    analyticsSummaryCard('Обучающих замен', summary.learned_replacement_count || 0),
+  ].join('');
+
+  const usersContainer = document.getElementById('analytics-users');
+  const userItems = (data.users || []).map((user) => {
+    const files = (user.files || []).slice(0, 5).map((file) => `
+      <div class="analytics-subitem">
+        <span>${esc(file.filename || file.job_id || '')}</span>
+        <span>${file.saved_at ? new Date(file.saved_at).toLocaleString('ru-RU') : ''}</span>
+      </div>
+    `).join('');
+    return `
+      <div class="analytics-user-card">
+        <div class="analytics-user-head">
+          <div>
+            <div class="analytics-user-name">${esc(user.display_name || user.username || '')}</div>
+            <div class="analytics-user-login">${esc(user.username || '')}</div>
+          </div>
+          <span class="analytics-role">${user.role === 'admin' ? 'admin' : 'manager'}</span>
+        </div>
+        <div class="analytics-user-stats">
+          <span>Файлов: <strong>${user.saved_files || 0}</strong></span>
+          <span>Строк: <strong>${user.total_rows || 0}</strong></span>
+          <span>Замен: <strong>${user.replacement_count || 0}</strong></span>
+          <span>Обучили: <strong>${user.learned_replacement_count || 0}</strong></span>
+        </div>
+        ${files ? `<div class="analytics-sublist">${files}</div>` : '<div class="empty-state">Пока нет сохранённых файлов</div>'}
+      </div>
+    `;
+  });
+  usersContainer.innerHTML = userItems.length ? userItems.join('') : '<div class="empty-state">Нет данных</div>';
+
+  const exportsContainer = document.getElementById('analytics-exports');
+  const exportItems = (data.exports || []).map((entry) => {
+    const replacements = (entry.replacements || []).slice(0, 8).map((replacement) => `
+      <div class="analytics-subitem analytics-subitem-multiline">
+        <div>
+          <strong>${esc(replacement.name || '')}</strong>
+          ${replacement.mark ? `<span class="analytics-inline-muted"> · ${esc(replacement.mark)}</span>` : ''}
+        </div>
+        <div class="analytics-inline-muted">
+          ${esc(replacement.candidate_name || '')} (${esc(replacement.candidate_code || '')})
+          ${replacement.learned_on_export ? ' · обучение' : ''}
+        </div>
+      </div>
+    `).join('');
+    return `
+      <div class="analytics-export-card">
+        <div class="analytics-export-head">
+          <div>
+            <div class="analytics-user-name">${esc(entry.filename || '')}</div>
+            <div class="analytics-inline-muted">${esc(entry.saved_by_display || entry.saved_by || '')} · ${entry.saved_at ? new Date(entry.saved_at).toLocaleString('ru-RU') : ''}</div>
+          </div>
+          <div class="analytics-user-stats">
+            <span>Строк: <strong>${entry.total_rows || 0}</strong></span>
+            <span>Замен: <strong>${entry.replacement_count || 0}</strong></span>
+            <span>Обучили: <strong>${entry.learned_replacement_count || 0}</strong></span>
+          </div>
+        </div>
+        ${replacements ? `<div class="analytics-sublist">${replacements}</div>` : '<div class="empty-state">В этом сохранении не было замен</div>'}
+      </div>
+    `;
+  });
+  exportsContainer.innerHTML = exportItems.length ? exportItems.join('') : '<div class="empty-state">Нет сохранённых файлов</div>';
+
+  const topContainer = document.getElementById('analytics-top-replacements');
+  const topItems = (data.top_replacements || []).map((item) => `
+    <div class="analytics-top-item">
+      <div>
+        <div class="analytics-user-name">${esc(item.candidate_name || '')}</div>
+        <div class="analytics-inline-muted">${esc(item.candidate_code || '')}</div>
+      </div>
+      <div class="analytics-user-stats">
+        <span>Использований: <strong>${item.times_used || 0}</strong></span>
+        <span>Обучений: <strong>${item.times_learned || 0}</strong></span>
+      </div>
+    </div>
+  `).join('');
+  topContainer.innerHTML = topItems || '<div class="empty-state">Пока нет данных по заменам</div>';
 }
