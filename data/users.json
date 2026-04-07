@@ -30,6 +30,108 @@
       "display_name": "Панов",
       "role": "manager",
       "password_sha256": "073d3b0fd9092432dbfdd7efd66912e0c736eb01c5d31e5583bfb244d1c3b047"
+    },
+    {
+      "username": "evlash",
+      "display_name": "Evlash",
+      "role": "manager",
+      "password_sha256": "c09582dcf542022112f9c5313045c43910675434a4486e440369c9c33d29a171"
+    },
+    {
+      "username": "zhukova",
+      "display_name": "Zhukova",
+      "role": "manager",
+      "password_sha256": "0a1954a487177cc717104d967eb5962ee5c14970ef7f06a9e24b0363cdc6a334"
+    },
+    {
+      "username": "dmitrieva",
+      "display_name": "Dmitrieva",
+      "role": "manager",
+      "password_sha256": "822c14d04b879ce90b0a9804afdf3f8b5b3e5c48916e8b3f1ed7b353e29c02e5"
+    },
+    {
+      "username": "glushkova",
+      "display_name": "Glushkova",
+      "role": "manager",
+      "password_sha256": "059abcdaf2f2d2fbd6d40a18ff9e7d23db83e8ea1662b1b8d96f7ff3a189dbd0"
+    },
+    {
+      "username": "efim",
+      "display_name": "Efim",
+      "role": "manager",
+      "password_sha256": "46957db596ec41cc39bbfe0083740a488c59970b13e4b39e7937edb518696e3b"
+    },
+    {
+      "username": "skorobogatova",
+      "display_name": "Skorobogatova",
+      "role": "manager",
+      "password_sha256": "d66164b0a45f11197fa18423cf3f021d2c0e8d9d7c8999db0944ba227fc8fe4b"
+    },
+    {
+      "username": "nikerin",
+      "display_name": "Nikerin",
+      "role": "manager",
+      "password_sha256": "8085a4db654a9e033f384613d589d15de84d9b36b192313ee0df7eb880954653"
+    },
+    {
+      "username": "evdokimov",
+      "display_name": "Evdokimov",
+      "role": "manager",
+      "password_sha256": "79b717a5233485dcbfcd40edf068b091189b54f6bbfa3213a2228f74947ef2bd"
+    },
+    {
+      "username": "sukmanov",
+      "display_name": "Sukmanov",
+      "role": "manager",
+      "password_sha256": "1de9a94dd85dc7680aeeadab8a53c5b16b93a10c1640e404cb1dc4e141f507c6"
+    },
+    {
+      "username": "gorbunov",
+      "display_name": "Gorbunov",
+      "role": "manager",
+      "password_sha256": "0aa87b8bdb3232d735bf0d7af483d370929809e7b30f6e693b09a99353a9ab13"
+    },
+    {
+      "username": "docenko",
+      "display_name": "Docenko",
+      "role": "manager",
+      "password_sha256": "3b65412af8181a18df09617a499890af5dd1cb776b007dc161d7198ad8068a89"
+    },
+    {
+      "username": "dzhalagania",
+      "display_name": "Dzhalagania",
+      "role": "manager",
+      "password_sha256": "5a8872eea42b4ef89a5f912884a55d5077011f4e1f25b2133b3c7bb9d363c8b2"
+    },
+    {
+      "username": "azovskii",
+      "display_name": "Azovskii",
+      "role": "manager",
+      "password_sha256": "6cb53d8fe521d4d74153b47ea67b9e08a2967cfdbb482237b6325b03315b1daf"
+    },
+    {
+      "username": "pshenicin",
+      "display_name": "Pshenicin",
+      "role": "manager",
+      "password_sha256": "8352dd9eb8b64669e0a8347fd37ae6e5cd67c817f2b4b1eec4475d466ab59eb7"
+    },
+    {
+      "username": "oorzhak",
+      "display_name": "Oorzhak",
+      "role": "manager",
+      "password_sha256": "da360c513cf899bb114f176a88d5da586b6e184c0bdadd4ea63b2576057932de"
+    },
+    {
+      "username": "vdovenko",
+      "display_name": "Vdovenko",
+      "role": "manager",
+      "password_sha256": "a519d06078668edbce26f733c5e5effa303fe5179527ad936d070f1261753e98"
+    },
+    {
+      "username": "danigevich",
+      "display_name": "Danigevich",
+      "role": "manager",
+      "password_sha256": "b912bf62fef4cb0ace94878825bc0636b97640e050389e6c2dbc4ed256e0700d"
     }
   ]
 }
