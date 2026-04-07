@@ -1,7 +1,7 @@
 /* ===== State ===== */
 // On GitHub Pages, point to the Railway backend; locally use same origin.
 const API = window.location.hostname.endsWith('github.io')
-  ? 'https://1c-matching-api-production.up.railway.app'
+  ? 'https://1c-matching-api-production-0a95.up.railway.app'
   : '';
 let token = localStorage.getItem('auth_token') || '';
 let currentUser = JSON.parse(localStorage.getItem('auth_user') || 'null');
