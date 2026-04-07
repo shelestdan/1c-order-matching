@@ -333,6 +333,7 @@ FAMILY_PATTERNS = {
     "flange": ("flanec",),
     "grooved": ("gruvlok",),
     "homut": ("homut",),
+    "insulation": ("kflex", "k-flex", "energoflex", "superterm", "teploizol"),
     "compensator": ("kompensator", "gibk", "vstavk"),
     "kran": ("kran", "kshc"),
     "klapan": ("klapan",),
@@ -435,6 +436,7 @@ PRIMARY_FAMILY_TAGS = {
     "filter",
     "homut",
     "gearbox",
+    "insulation",
     "klapan",
     "kran",
     "manometer",
@@ -457,7 +459,11 @@ PRIMARY_FAMILY_TAGS = {
 }
 
 NON_BLOCKING_FAMILY_TAGS = {
-    "rezba",
+    "rezba",  # резьба — компонент множества изделий
+    "mixer",  # смеситель — часть комбо (умывальник + смеситель)
+    "siphon",  # сифон — часть комбо (раковина + сифон)
+    "mufta",  # муфта — часть комбо (кран + муфта)
+    "grooved",  # grooved соединение — вторичный тип
 }
 
 FAMILY_EXACT_REASONS = {
@@ -1868,6 +1874,17 @@ def extract_dimension_tags(*parts: object) -> set[str]:
             mapped_dn = VGP_OD_TO_DN.get(normalized_od)
             if mapped_dn:
                 tags.add(f"dn:{mapped_dn}")
+
+    # Infer tripledn for equal-pass tees with single DN and no tripledn/pairdn yet
+    tee_families = extract_tag_values(extract_family_tags(*parts), "family:")
+    has_tripledn = any(t.startswith("tripledn:") for t in tags)
+    has_pairdn = any(t.startswith("pairdn:") for t in tags)
+    if "tee" in tee_families and not has_tripledn and not has_pairdn:
+        dn_values = extract_tag_values(tags, "dn:")
+        if len(dn_values) == 1:
+            single_dn = list(dn_values)[0]
+            tags.add(f"tripledn:{normalize_multi_measure_tag(single_dn, single_dn, single_dn)}")
+
     return tags
 
 
@@ -3586,12 +3603,18 @@ class StockMatcher:
             return "analog", best, policy_analog_reason
         if best.score >= 72:
             return "analog", best, "нужна ручная проверка"
+        # High word overlap without dimension info (e.g. "Вентиль запорный" → "Клапан (Вентиль) запорный")
+        if best.score >= 60 and best.overlap >= 0.55 and best.dimension_penalty == 0:
+            return "analog", best, "высокое пересечение ключевых слов, нужна ручная проверка"
         if best.dimension_penalty == 0 and best.dimension_bonus >= 30 and best.score >= 58:
             return "analog", best, "сильное совпадение по исполнению и размерам, нужна ручная проверка"
         if best.dimension_penalty == 0 and best.dimension_bonus >= 18 and best.score >= 50 and best.overlap >= 0.45:
             return "analog", best, "совпадают ключевые слова и размеры, нужна ручная проверка"
         if best.dimension_bonus >= 18 and best.score >= 52 and (best.overlap >= 0.35 or best.soft_overlap >= 0.45):
             return "analog", best, "совпадают тип изделия и размеры, нужна ручная проверка"
+        # Relaxed threshold for strong dimension matches with no conflicts
+        if best.dimension_penalty == 0 and best.dimension_bonus >= 18 and best.score >= 55 and (best.overlap >= 0.15 or best.soft_overlap >= 0.30):
+            return "analog", best, "совпадают размеры и тип, нужна ручная проверка"
         if best.dimension_bonus >= 10 and best.score >= 58 and (best.overlap >= 0.20 or best.soft_overlap >= 0.35):
             return "analog", best, "совпадают размеры, нужна ручная проверка"
         if best.code_hit and best.score >= 58:
