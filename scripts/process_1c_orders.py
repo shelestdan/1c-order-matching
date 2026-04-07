@@ -94,6 +94,12 @@ LATIN_TO_CYR_MIXED = {
     "S": "Ѕ",
 }
 
+# Reverse map: Cyrillic → Latin for visually similar chars (auto-built, first-occurrence wins)
+CYR_TO_LATIN_MIXED: dict[str, str] = {}
+for _lat, _cyr in LATIN_TO_CYR_MIXED.items():
+    if _cyr not in CYR_TO_LATIN_MIXED:
+        CYR_TO_LATIN_MIXED[_cyr] = _lat
+
 VISUAL_CODE_MAP = {
     "А": "a",
     "а": "a",
@@ -631,6 +637,7 @@ PARSER_MIXED_SCRIPT_HINTS: dict[str, object] = {}
 PARSER_TOKEN_ALIASES: dict[str, tuple[str, ...]] = {}
 PARSER_FAMILY_TRIGGERS: dict[str, dict[str, object]] = {}
 PARSER_MIXED_CHAR_MAP: dict[str, str] = dict(LATIN_TO_CYR_MIXED)
+PARSER_MIXED_CHAR_MAP_REVERSE: dict[str, str] = dict(CYR_TO_LATIN_MIXED)
 PARSER_IGNORE_FULL_ROW_PATTERNS: tuple[str, ...] = ()
 PARSER_STRIP_LEADING_PATTERNS: tuple[str, ...] = ()
 PARSER_STRIP_TRAILING_PATTERNS: tuple[str, ...] = ()
@@ -971,7 +978,14 @@ def fix_mixed_script_token(token: str) -> str:
     if not token:
         return token
     if CYRILLIC_RE.search(token) and LATIN_RE.search(token):
-        return "".join(PARSER_MIXED_CHAR_MAP.get(char, char) for char in token)
+        lat_count = len(LATIN_RE.findall(token))
+        cyr_count = len(CYRILLIC_RE.findall(token))
+        if lat_count >= cyr_count:
+            # Latin-dominant (tech terms like PE-xa): Cyrillic → Latin
+            return "".join(PARSER_MIXED_CHAR_MAP_REVERSE.get(char, char) for char in token)
+        else:
+            # Cyrillic-dominant: Latin → Cyrillic
+            return "".join(PARSER_MIXED_CHAR_MAP.get(char, char) for char in token)
     return token
 
 
@@ -1000,6 +1014,7 @@ def initialize_parser_hints() -> None:
     global PARSER_TOKEN_ALIASES
     global PARSER_FAMILY_TRIGGERS
     global PARSER_MIXED_CHAR_MAP
+    global PARSER_MIXED_CHAR_MAP_REVERSE
     global PARSER_IGNORE_FULL_ROW_PATTERNS
     global PARSER_STRIP_LEADING_PATTERNS
     global PARSER_STRIP_TRAILING_PATTERNS
@@ -1035,6 +1050,11 @@ def initialize_parser_hints() -> None:
     ).items():
         if isinstance(key, str) and len(key) == 1 and isinstance(value, str) and len(value) == 1:
             PARSER_MIXED_CHAR_MAP[key] = value
+    # Build reverse map (Cyrillic → Latin) from forward map
+    PARSER_MIXED_CHAR_MAP_REVERSE = {}
+    for _fwd_lat, _fwd_cyr in PARSER_MIXED_CHAR_MAP.items():
+        if _fwd_cyr not in PARSER_MIXED_CHAR_MAP_REVERSE:
+            PARSER_MIXED_CHAR_MAP_REVERSE[_fwd_cyr] = _fwd_lat
     PARSER_IGNORE_FULL_ROW_PATTERNS = tuple(
         pattern
         for pattern in PARSER_PREPROCESSING_HINTS.get("ignore_full_row_patterns", [])
@@ -1333,7 +1353,16 @@ _PLUMBING_ABBREV_MAP: dict[str, list[str]] = {
     "pp-h": ["polipropilen"],
     "ppr": ["polipropilen"],
     "pe-x": ["polietilen"],
+    "pe-xa": ["polietilen"],
+    "pex": ["polietilen"],
     "mp": ["metalloplastik"],
+    # Heating / radiator abbreviations
+    "term": ["termostaticheskii"],
+    "aksial": ["aksialnyi"],
+    "regulir": ["reguliruiushchii"],
+    "zap": ["zapornyi"],
+    "bim": ["bimetallicheskii"],
+    "alyum": ["aliuminievyi"],
 }
 
 
@@ -3066,6 +3095,9 @@ class StockMatcher:
             return True
         stock_grades = extract_tag_values(stock.dimension_tags, "grade:")
         if not stock_grades:
+            # Gradeless steel assumed CS20; gradeless stainless compatible with any stainless grade
+            if "stainless" in stock_materials and "stainless" in order_materials:
+                return True
             return "steel" in stock_materials and order_grades == {"cs20"}
         return bool(order_grades & stock_grades)
 
@@ -3159,7 +3191,7 @@ class StockMatcher:
             candidate_ids.update(matches)
             if len(candidate_ids) >= 350:
                 break
-        if len(candidate_ids) < 40:
+        if len(candidate_ids) < 200:
             informative_roots = sorted(
                 order.root_tokens,
                 key=lambda token: (len(self.root_index.get(token, [])) or 100000, -len(token), token),
@@ -3171,9 +3203,19 @@ class StockMatcher:
                 candidate_ids.update(matches)
                 if len(candidate_ids) >= 450:
                     break
-        if not candidate_ids:
-            for tag in order.dimension_tags:
-                candidate_ids.update(self.dimension_index.get(tag, []))
+        # Add dimension-matched candidates via intersection of 2+ dimension tags
+        dim_sets: list[set[int]] = []
+        for tag in order.dimension_tags:
+            if tag.startswith("family:") or tag.startswith("mclass:") or tag.startswith("conn_gender:"):
+                continue
+            dim_matches = self.dimension_index.get(tag, [])
+            if dim_matches:
+                dim_sets.append(set(dim_matches))
+        if len(dim_sets) >= 2:
+            # intersect smallest two sets → precise candidates
+            dim_sets.sort(key=len)
+            intersected = dim_sets[0] & dim_sets[1]
+            candidate_ids.update(intersected)
         if self.manual_selection_memory:
             candidate_ids.update(self._manual_learning_signals(order))
         candidates = list(candidate_ids)
@@ -3246,6 +3288,19 @@ class StockMatcher:
             if order_values & stock_values:
                 dimension_bonus += bonus
                 matched_dimension_keys.append(key)
+            elif key == "lmm":
+                # Tolerance for L-dimension: if values within 10mm, halve penalty
+                try:
+                    o_nums = {float(v) for v in order_values}
+                    s_nums = {float(v) for v in stock_values}
+                    min_diff = min(abs(o - s) for o in o_nums for s in s_nums)
+                except (ValueError, TypeError):
+                    min_diff = 999
+                if min_diff <= 10:
+                    dimension_penalty += penalty * 0.25
+                else:
+                    dimension_penalty += penalty
+                    conflicting_dimension_keys.append(key)
             else:
                 dimension_penalty += penalty
                 conflicting_dimension_keys.append(key)
@@ -3378,6 +3433,23 @@ class StockMatcher:
                 matched_list = list(matched_ids)
                 dimension_bonus[matched_list] += bonus
                 dimension_penalty[matched_list] -= penalty
+            # lmm tolerance: items close but not exact get reduced penalty
+            if key == "lmm":
+                try:
+                    o_nums = {float(v) for v in order_values}
+                except (ValueError, TypeError):
+                    o_nums = set()
+                if o_nums:
+                    unmatched = set(group_matches) - matched_ids
+                    for sid in unmatched:
+                        s_tags = extract_tag_values(self.stock_items[sid].dimension_tags, "lmm:")
+                        try:
+                            s_nums = {float(v) for v in s_tags}
+                        except (ValueError, TypeError):
+                            continue
+                        min_diff = min((abs(o - s) for o in o_nums for s in s_nums), default=999)
+                        if min_diff <= 10:
+                            dimension_penalty[sid] -= penalty * 0.75
 
         base_scores = 0.45 * set_ratio + 20.0 * overlap + 18.0 * soft_overlap + dimension_bonus - dimension_penalty
         if "family:flange" in order.dimension_tags:
@@ -3619,6 +3691,9 @@ class StockMatcher:
             return "analog", best, "совпадают размеры, нужна ручная проверка"
         if best.code_hit and best.score >= 58:
             return "analog", best, "совпал код/марка, нужна ручная проверка"
+        # Catch near-miss items with strong dimension match
+        if best.dimension_penalty == 0 and best.dimension_bonus >= 16 and best.score >= 42 and best.overlap >= 0.20:
+            return "analog", best, "размеры совпадают, но низкое пересечение текста, нужна ручная проверка"
         return "not_found", best, "подходящего совпадения нет"
 
 
