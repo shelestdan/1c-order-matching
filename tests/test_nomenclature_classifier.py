@@ -130,6 +130,61 @@ class HybridNomenclatureClassifierTest(unittest.TestCase):
         self.assertIn("polyethylene", pe_result.normalized.attributes["material"])
         self.assertIn("polyethylene", pnd_result.normalized.attributes["material"])
 
+    def test_ppu_material_is_not_compatible_with_plain_pe(self) -> None:
+        order_name = "Труба ПЭ Ду110"
+        stock_name = "Труба ППУ Ду110"
+        order_search_text = build_search_text(order_name)
+        stock_search_text = build_search_text(stock_name)
+        order_tags = extract_material_tags_from_search_text(order_search_text)
+        stock_tags = extract_material_tags_from_search_text(stock_search_text)
+
+        self.assertIn("mclass:polyethylene", order_tags)
+        self.assertIn("mclass:ppu", stock_tags)
+
+        order = OrderLine(
+            source_file="demo.xlsx",
+            sheet_name="Sheet1",
+            source_row=1,
+            headers=[],
+            row_values=[],
+            position="1",
+            name=order_name,
+            mark="",
+            supplier_code="",
+            vendor="",
+            unit="м",
+            requested_qty=1.0,
+            search_text=order_search_text,
+            search_tokens=extract_tokens(order_search_text),
+            key_tokens=extract_key_tokens(extract_tokens(order_search_text)),
+            root_tokens=extract_root_tokens(extract_tokens(order_search_text)),
+            code_tokens=set(),
+            dimension_tags=extract_dimension_tags(order_name) | extract_family_tags(order_name) | order_tags,
+            raw_query=order_name,
+            classification=None,
+        )
+        stock = StockItem(
+            row_index=1,
+            code_1c="PPU",
+            name=stock_name,
+            print_name=stock_name,
+            product_type="",
+            sale_price="",
+            stop_price="",
+            plan_price="",
+            quantity=3.0,
+            remaining=3.0,
+            search_text=stock_search_text,
+            search_tokens=extract_tokens(stock_search_text),
+            key_tokens=extract_key_tokens(extract_tokens(stock_search_text)),
+            root_tokens=extract_root_tokens(extract_tokens(stock_search_text)),
+            code_tokens=set(),
+            dimension_tags=extract_dimension_tags(stock_name) | extract_family_tags(stock_name) | stock_tags,
+        )
+
+        matcher = StockMatcher([stock])
+        self.assertFalse(matcher._has_compatible_materials(order, stock))
+
     def test_typo_and_semantic_hook(self) -> None:
         typo_result = self.classifier.classify("затвр дисквый dn100")
         self.assertNotEqual(typo_result.status, ClassificationStatus.UNCLASSIFIED)

@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -836,6 +837,52 @@ def _build_manual_search_order(row: dict[str, Any], query: str) -> OrderLine:
     )
 
 
+def _build_row_context_order(row: dict[str, Any]) -> OrderLine:
+    name = str(row.get("name") or "").strip()
+    mark = str(row.get("mark") or "").strip()
+    vendor = str(row.get("vendor") or "").strip()
+    unit = str(row.get("unit") or "").strip()
+    requested_qty = float(row.get("requested_qty") or 0.0)
+    raw_query = str(row.get("raw_query") or "").strip()
+    search_text = str(row.get("search_text") or "").strip()
+    if not search_text:
+        search_text = build_search_text(name, mark, vendor)
+    dimension_tags = {str(tag) for tag in row.get("dimension_tags") or [] if str(tag).strip()}
+    if not dimension_tags:
+        dimension_tags = (
+            extract_dimension_tags(name, mark, vendor)
+            | extract_family_tags(name, mark, vendor)
+            | extract_parser_hint_tags(name, mark, vendor)
+            | extract_material_tags_from_search_text(search_text)
+        )
+        search_text = augment_search_text_with_dimension_tags(search_text, dimension_tags)
+    search_tokens = extract_tokens(search_text)
+    key_tokens = {str(token) for token in row.get("key_tokens") or [] if str(token).strip()} or extract_key_tokens(search_tokens)
+    root_tokens = {str(token) for token in row.get("root_tokens") or [] if str(token).strip()} or extract_root_tokens(search_tokens)
+    return OrderLine(
+        source_file="manual_search_context",
+        sheet_name="manual_search_context",
+        source_row=0,
+        headers=[],
+        row_values=[],
+        position=str(row.get("position") or ""),
+        name=name,
+        mark=mark,
+        supplier_code="",
+        vendor=vendor,
+        unit=unit,
+        requested_qty=requested_qty,
+        search_text=search_text,
+        search_tokens=search_tokens,
+        key_tokens=key_tokens,
+        root_tokens=root_tokens,
+        code_tokens=extract_code_tokens(name, mark, vendor),
+        dimension_tags=dimension_tags,
+        raw_query=raw_query or name,
+        classification=None,
+    )
+
+
 def _normalize_manual_code(value: str) -> str:
     return re.sub(r"[^0-9a-zа-я]+", "", value.lower())
 
@@ -847,18 +894,43 @@ def _manual_search_candidates(
     limit: int,
 ) -> list[Candidate]:
     manual_order = _build_manual_search_order(row, query)
+    context_order = _build_row_context_order(row)
     query_lower = query.strip().lower()
     normalized_code_query = _normalize_manual_code(query)
     ranked: list[Candidate] = []
 
     for stock in matcher.stock_items:
-        candidate = matcher.score_candidate(manual_order, stock)
-        reasons = list(candidate.reasons)
-        score = candidate.score
+        query_candidate = matcher.score_candidate(manual_order, stock)
+        context_candidate = matcher.score_candidate(context_order, stock)
+        reasons = list(query_candidate.reasons)
+        score = query_candidate.score
 
         stock_code_lower = (stock.code_1c or "").lower()
         stock_name_lower = (stock.name or "").lower()
         normalized_stock_code = _normalize_manual_code(stock.code_1c or "")
+
+        query_weight = 0.62 if len(query_lower) >= 6 else 0.54
+        context_weight = 1.0 - query_weight
+        score = max(score, query_candidate.score * query_weight + context_candidate.score * context_weight)
+
+        context_family_match = float(context_candidate.feature_scores.get("family_match", 0.0))
+        context_material_match = float(context_candidate.feature_scores.get("material_match", 0.0))
+        context_structure_overlap = float(context_candidate.feature_scores.get("structure_overlap", 0.0))
+        if context_family_match > 0.0 and context_material_match > 0.0:
+            score += 8.0
+            reasons.append("совпадает тип и материал с заявкой")
+        elif context_family_match > 0.0:
+            score += 5.0
+            reasons.append("совпадает тип изделия с заявкой")
+        if context_candidate.dimension_bonus >= 10.0:
+            score += 10.0
+            reasons.append("совпадают размеры с заявкой")
+        elif context_candidate.dimension_bonus >= 6.0:
+            score += 6.0
+            reasons.append("частично совпадают размеры с заявкой")
+        if context_structure_overlap >= 0.25:
+            score += 4.0
+            reasons.append("учтена структура исходной строки")
 
         if query_lower and stock_code_lower == query_lower:
             score = max(score, 100.0)
@@ -870,19 +942,36 @@ def _manual_search_candidates(
             score = max(score, min(96.0, score + 20.0))
             reasons.append("совпадение по фрагменту кода/названия")
 
+        retrieval_paths = tuple(
+            dict.fromkeys([*getattr(query_candidate, "retrieval_paths", ()), *getattr(context_candidate, "retrieval_paths", ()), "manual_query", "manual_context"])
+        )
+        feature_scores = dict(getattr(query_candidate, "feature_scores", {}) or {})
+        feature_scores.update(
+            {
+                "manual_query_score": round(query_candidate.score, 3),
+                "row_context_score": round(context_candidate.score, 3),
+                "row_context_overlap": round(context_candidate.overlap, 4),
+                "row_context_soft_overlap": round(context_candidate.soft_overlap, 4),
+                "row_context_dimension_bonus": round(context_candidate.dimension_bonus, 3),
+                "row_context_family_match": context_family_match,
+                "row_context_material_match": context_material_match,
+            }
+        )
         ranked.append(
             Candidate(
-                stock=candidate.stock,
+                stock=query_candidate.stock,
                 score=max(0.0, min(100.0, score)),
-                overlap=candidate.overlap,
+                overlap=max(query_candidate.overlap, context_candidate.overlap),
                 reasons=tuple(dict.fromkeys(reasons)),
-                code_hit=bool(candidate.code_hit or (normalized_code_query and normalized_stock_code == normalized_code_query)),
-                dimension_bonus=candidate.dimension_bonus,
-                dimension_penalty=candidate.dimension_penalty,
-                soft_overlap=candidate.soft_overlap,
-                matched_dimension_keys=candidate.matched_dimension_keys,
-                conflicting_dimension_keys=candidate.conflicting_dimension_keys,
-                review_decision=candidate.review_decision,
+                code_hit=bool(query_candidate.code_hit or (normalized_code_query and normalized_stock_code == normalized_code_query)),
+                dimension_bonus=max(query_candidate.dimension_bonus, context_candidate.dimension_bonus),
+                dimension_penalty=min(query_candidate.dimension_penalty, context_candidate.dimension_penalty),
+                soft_overlap=max(query_candidate.soft_overlap, context_candidate.soft_overlap),
+                matched_dimension_keys=tuple(dict.fromkeys([*query_candidate.matched_dimension_keys, *context_candidate.matched_dimension_keys])),
+                conflicting_dimension_keys=tuple(dict.fromkeys(query_candidate.conflicting_dimension_keys)),
+                review_decision=query_candidate.review_decision,
+                retrieval_paths=retrieval_paths,
+                feature_scores=feature_scores,
             )
         )
 
@@ -909,6 +998,8 @@ def _manual_search_candidates(
             and candidate.overlap < MANUAL_SEARCH_MIN_OVERLAP
             and candidate.soft_overlap < MANUAL_SEARCH_MIN_SOFT_OVERLAP
             and candidate.dimension_bonus < MANUAL_SEARCH_MIN_DIMENSION_BONUS
+            and float(candidate.feature_scores.get("row_context_score", 0.0)) < 44.0
+            and float(candidate.feature_scores.get("row_context_dimension_bonus", 0.0)) < 6.0
         ):
             continue
         filtered.append(candidate)
@@ -916,6 +1007,57 @@ def _manual_search_candidates(
         if len(filtered) >= limit:
             break
     return filtered
+
+
+def _job_is_editable(data: dict[str, Any]) -> bool:
+    return not data.get("saved_at") and int(data.get("export_count", 0) or 0) == 0
+
+
+def _parse_requested_quantity(value: object) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Количество должно быть числом")
+    if not math.isfinite(number) or number <= 0:
+        raise HTTPException(400, "Количество должно быть больше нуля")
+    return round(number, 3)
+
+
+def _row_max_editable_quantity(row: dict[str, Any]) -> float | None:
+    approved = row.get("approved_analog")
+    if isinstance(approved, dict):
+        for key in ("remaining", "stock_qty"):
+            value = approved.get(key)
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number) and number > 0:
+                return number
+    if row.get("matched_code"):
+        for key in ("matched_stock_qty", "available_qty"):
+            value = row.get(key)
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number) and number > 0:
+                return number
+    return None
+
+
+def _update_row_quantity_inplace(row: dict[str, Any], quantity: float) -> None:
+    max_quantity = _row_max_editable_quantity(row)
+    if max_quantity is not None and quantity > max_quantity + 1e-9:
+        raise HTTPException(400, f"Нельзя поставить количество больше доступного остатка: {max_quantity:g}")
+
+    row["requested_qty"] = quantity
+    if row.get("approved_analog"):
+        return
+    if row.get("matched_code"):
+        row["available_qty"] = quantity if max_quantity is None else min(quantity, max_quantity)
+        if row.get("status") in {"Найдено полностью", "Найдено частично"} and max_quantity is not None and quantity <= max_quantity:
+            row["status"] = "Найдено полностью"
 
 
 def _find_row(data: dict[str, Any], row_id: str) -> dict[str, Any]:
@@ -1676,6 +1818,34 @@ def select_manual_candidate(job_id: str, body: ManualSelectRequest, authorizatio
     data["status_counts"] = status_counts
     _save_job(job_id, data)
     return {"row": row, "status_counts": status_counts}
+
+
+class RowQuantityUpdateRequest(BaseModel):
+    quantity: float
+
+
+@app.post("/api/jobs/{job_id}/rows/{row_id}/quantity")
+def update_row_quantity(
+    job_id: str,
+    row_id: str,
+    body: RowQuantityUpdateRequest,
+    authorization: str | None = Header(None),
+):
+    user = _check_auth(authorization)
+    data = _load_job(job_id)
+    _ensure_job_access(user, data)
+    if not _job_is_editable(data):
+        raise HTTPException(400, "Количество можно менять только до выгрузки файла")
+
+    row = _find_row(data, row_id)
+    quantity = _parse_requested_quantity(body.quantity)
+    _update_row_quantity_inplace(row, quantity)
+
+    status_counts = _rebuild_status_counts(data["rows"])
+    data["status_counts"] = status_counts
+    _save_job(job_id, data)
+    _jobs[job_id] = _build_job_summary(job_id, data, float(data.get("created_at") or time.time()))
+    return data
 
 
 @app.post("/api/jobs/{job_id}/export")

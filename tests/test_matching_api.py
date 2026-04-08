@@ -15,14 +15,30 @@ from matching_api import (  # noqa: E402
     SHARED_PASSWORD,
     AuthUser,
     STATUS_NOT_FOUND,
+    _manual_search_candidates,
+    _parse_requested_quantity,
     _authenticate_user,
     _build_admin_analytics,
     _build_export_audit_event,
     _ensure_job_access,
     _hash_password,
     _serialize_candidate,
+    _update_row_quantity_inplace,
 )
-from process_1c_orders import Candidate, StockItem  # noqa: E402
+from process_1c_orders import (  # noqa: E402
+    Candidate,
+    OrderLine,
+    StockItem,
+    StockMatcher,
+    augment_search_text_with_dimension_tags,
+    build_search_text,
+    extract_dimension_tags,
+    extract_family_tags,
+    extract_key_tokens,
+    extract_material_tags_from_search_text,
+    extract_root_tokens,
+    extract_tokens,
+)
 
 
 class MatchingApiHelpersTest(unittest.TestCase):
@@ -297,6 +313,100 @@ class MatchingApiHelpersTest(unittest.TestCase):
         self.assertEqual(payload["remaining"], 88.0)
         self.assertEqual(payload["retrieval_paths"], ["structure", "family"])
         self.assertEqual(payload["feature_scores"]["family_match"], 1.0)
+
+    def test_manual_search_uses_row_context_to_prefer_same_family(self) -> None:
+        def make_stock(row_index: int, code: str, name: str) -> StockItem:
+            search_text = build_search_text(name)
+            dimension_tags = (
+                extract_dimension_tags(name)
+                | extract_family_tags(name)
+                | extract_material_tags_from_search_text(search_text)
+            )
+            search_text = augment_search_text_with_dimension_tags(search_text, dimension_tags)
+            tokens = extract_tokens(search_text)
+            return StockItem(
+                row_index=row_index,
+                code_1c=code,
+                name=name,
+                print_name=name,
+                product_type="",
+                sale_price="",
+                stop_price="",
+                plan_price="",
+                quantity=20.0,
+                remaining=20.0,
+                search_text=search_text,
+                search_tokens=tokens,
+                key_tokens=extract_key_tokens(tokens),
+                root_tokens=extract_root_tokens(tokens),
+                code_tokens=set(),
+                dimension_tags=dimension_tags,
+            )
+
+        row_name = "Переход ст. приварной 89х40х3,5 мм"
+        row_search_text = build_search_text(row_name)
+        row_dimension_tags = (
+            extract_dimension_tags(row_name)
+            | extract_family_tags(row_name)
+            | extract_material_tags_from_search_text(row_search_text)
+        )
+        row_search_text = augment_search_text_with_dimension_tags(row_search_text, row_dimension_tags)
+        row_tokens = extract_tokens(row_search_text)
+        row = {
+            "id": "row-1",
+            "name": row_name,
+            "mark": "",
+            "vendor": "",
+            "unit": "шт",
+            "requested_qty": 3.0,
+            "raw_query": row_name,
+            "search_text": row_search_text,
+            "key_tokens": sorted(extract_key_tokens(row_tokens)),
+            "root_tokens": sorted(extract_root_tokens(row_tokens)),
+            "dimension_tags": sorted(row_dimension_tags),
+        }
+
+        reducer = make_stock(1, "RED", "Переход П-2- 89х4,0 - 57х3,5 Ст.20 ГОСТ 17378")
+        elbow = make_stock(2, "ELB", "Отвод 90-2- 89х3,5 Ст.20 ГОСТ 17375")
+        matcher = StockMatcher([elbow, reducer])
+
+        results = _manual_search_candidates(matcher, row, "89", limit=5)
+
+        self.assertEqual(results[0].stock.code_1c, "RED")
+        self.assertIn("manual_context", results[0].retrieval_paths)
+        self.assertGreater(results[0].feature_scores["row_context_score"], 0.0)
+
+    def test_update_row_quantity_inplace_rejects_over_available_stock(self) -> None:
+        row = {
+            "status": "Одобрена замена",
+            "requested_qty": 2.0,
+            "approved_analog": {"remaining": 5.0, "stock_qty": 5.0},
+        }
+
+        with self.assertRaises(HTTPException) as ctx:
+            _update_row_quantity_inplace(row, 6.0)
+
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_update_row_quantity_inplace_updates_exact_row(self) -> None:
+        row = {
+            "status": "Найдено полностью",
+            "requested_qty": 10.0,
+            "available_qty": 10.0,
+            "matched_code": "001",
+            "matched_stock_qty": 12.0,
+        }
+
+        _update_row_quantity_inplace(row, 7.0)
+
+        self.assertEqual(row["requested_qty"], 7.0)
+        self.assertEqual(row["available_qty"], 7.0)
+        self.assertEqual(row["status"], "Найдено полностью")
+
+    def test_parse_requested_quantity_requires_positive_number(self) -> None:
+        self.assertEqual(_parse_requested_quantity("2.5"), 2.5)
+        with self.assertRaises(HTTPException):
+            _parse_requested_quantity(0)
 
 
 if __name__ == "__main__":

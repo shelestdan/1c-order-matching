@@ -401,6 +401,10 @@ MATERIAL_CLASS_RULES = {
         "contains": ("pvc", "pvh"),
         "exact": {"pvc-u", "u-pvc"},
     },
+    "ppu": {
+        "contains": ("penopoliuretan", "ppu"),
+        "exact": {"ppu"},
+    },
     "polyethylene": {
         "contains": ("polietilen",),
         "exact": {"pe", "pe80", "pe100", "pnd", "hdpe", "pex", "pex-a", "pex-b", "pe-rt", "pert"},
@@ -3684,6 +3688,8 @@ class StockMatcher:
             return True
         stock_materials = extract_tag_values(stock.dimension_tags, "mclass:")
         if not stock_materials:
+            return False
+        if ("ppu" in order_materials) != ("ppu" in stock_materials):
             return False
         if not (order_materials & stock_materials):
             return False

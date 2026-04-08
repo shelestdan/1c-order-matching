@@ -11,6 +11,7 @@ let currentFilter = 'all';
 let pendingApprovals = {};  // row_id -> analog code_1c
 let searchResultsByRow = {}; // row_id -> manual search results
 let selectionInFlightRows = new Set();
+let qtyUpdateInFlightRows = new Set();
 let analyticsData = null;
 
 /* ===== Init ===== */
@@ -299,7 +300,7 @@ function renderTable(rows) {
         ${row.mark ? `<div class="match-code">${esc(row.mark)}</div>` : ''}
         ${row.vendor ? `<div class="match-comment">${esc(row.vendor)}</div>` : ''}
       </td>
-      <td class="col-qty">${row.requested_qty ?? ''}</td>
+      <td class="col-qty">${buildQtyCell(row)}</td>
       <td>${matchCell}</td>
       <td class="col-score">${row.confidence != null ? row.confidence : ''}</td>
       <td class="col-remaining">${displayRemainingQty(row)}</td>
@@ -327,6 +328,36 @@ function formatQty(value) {
   if (!Number.isFinite(num)) return esc(String(value));
   if (Number.isInteger(num)) return String(num);
   return String(num).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+}
+
+function isJobEditable() {
+  return !!currentJob && !currentJob.saved_at && !(Number(currentJob.export_count || 0) > 0);
+}
+
+function buildQtyCell(row) {
+  if (!isJobEditable()) {
+    return formatQty(row.requested_qty);
+  }
+  const isBusy = qtyUpdateInFlightRows.has(row.id);
+  return `
+    <div class="qty-editor">
+      <input
+        id="qty-${row.id}"
+        class="qty-input"
+        type="number"
+        min="0.001"
+        step="0.001"
+        value="${formatQty(row.requested_qty)}"
+        ${isBusy ? 'disabled' : ''}
+        onkeydown="handleQtyKey(event, '${row.id}')"
+      >
+      <button
+        class="btn btn-secondary btn-sm qty-save-btn"
+        ${isBusy ? 'disabled' : ''}
+        onclick="saveRowQuantity('${row.id}')"
+      >${isBusy ? '...' : 'OK'}</button>
+    </div>
+  `;
 }
 
 function displayRemainingQty(row) {
@@ -406,6 +437,45 @@ function buildActionCell(row) {
   }
   // Exact match — small ghost button to replace if needed
   return `<button class="btn btn-ghost btn-sm replace-btn" onclick="openModal('${id}')">Заменить</button>`;
+}
+
+function handleQtyKey(event, rowId) {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    saveRowQuantity(rowId);
+  }
+}
+
+async function saveRowQuantity(rowId) {
+  if (!currentJob || qtyUpdateInFlightRows.has(rowId)) return;
+  const row = allRows.find(r => r.id === rowId);
+  const input = document.getElementById(`qty-${rowId}`);
+  if (!row || !input) return;
+  const nextQty = Number(String(input.value || '').replace(',', '.'));
+  if (!Number.isFinite(nextQty) || nextQty <= 0) {
+    alert('Количество должно быть больше нуля');
+    input.focus();
+    return;
+  }
+  if (Number(row.requested_qty) === nextQty) return;
+
+  qtyUpdateInFlightRows.add(rowId);
+  filterRows(currentFilter);
+  try {
+    const res = await apiFetch(`/api/jobs/${currentJob.job_id}/rows/${rowId}/quantity`, 'POST', {
+      quantity: nextQty,
+    });
+    currentJob = { ...currentJob, ...res, job_id: currentJob.job_id };
+    allRows = res.rows || [];
+    renderResults(currentJob);
+  } catch (ex) {
+    qtyUpdateInFlightRows.delete(rowId);
+    filterRows(currentFilter);
+    alert('Ошибка изменения количества: ' + ex.message);
+    return;
+  }
+  qtyUpdateInFlightRows.delete(rowId);
+  filterRows(currentFilter);
 }
 
 function esc(str) {

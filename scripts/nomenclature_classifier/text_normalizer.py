@@ -156,6 +156,8 @@ class TextNormalizer:
             length_values = dedupe([*length_values, *token_length_values])
 
         materials: list[str] = []
+        if {"ppu", "penopoliuretan", "penopoliuretanovyi"} & token_set:
+            materials.append("ppu")
         if {"pe", "pnd", "hdpe", "pex", "pert"} & token_set:
             materials.append("polyethylene")
         if {"ppr", "polipropilen", "polipropilenovyi"} & token_set:
