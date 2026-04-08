@@ -202,7 +202,7 @@ CYR_TO_LAT = {
 
 HEADER_KEYWORDS = {
     "position": ("poz", "pozici", "pozits", "позиц", "поз", "nomer", "номер"),
-    "name": ("naimen", "naim", "harakter", "наимен", "наим", "характер"),
+    "name": ("naimen", "naim", "harakter", "наимен", "наим", "характер", "tovar", "товар", "nomenklat", "номенклат", "opisan", "описан", "produk", "продукц"),
     "mark": ("tip", "mark", "obozn", "модель", "тип", "марк", "обозн", "art", "арт"),
     "supplier_code": ("kod", "код", "artikul", "артикул"),
     "vendor": ("zavod", "izgotov", "postav", "brand", "бренд", "изготов", "постав"),
@@ -1213,7 +1213,7 @@ def extract_parser_hint_tags(*parts: object) -> set[str]:
         tags.add("conn_gender:fm")
     if re.search(r"(?<![a-zа-я0-9])ff(?![a-zа-я0-9])", normalized):
         tags.add("conn_gender:ff")
-    if re.search(r"(?<![a-zа-я0-9])mm(?![a-zа-я0-9])", normalized):
+    if re.search(r"(?<![a-zа-я0-9.,])mm(?![a-zа-я0-9])", normalized) and not re.search(r"\d\s*мм\b", normalized):
         tags.add("conn_gender:mm")
 
     if "американка" in normalized or "разъемное соединение" in normalized or "сгон разъемный" in normalized:
@@ -1286,6 +1286,9 @@ def extract_parser_hint_tags(*parts: object) -> set[str]:
     return tags
 
 
+_UNIT_TOKENS = {"мм", "мм.", "mm", "mm.", "шт", "шт.", "м", "м.", "кг", "кг."}
+
+
 def build_search_text(*parts: object) -> str:
     tokens: list[str] = []
     for part in parts:
@@ -1295,6 +1298,8 @@ def build_search_text(*parts: object) -> str:
         for alias_token in sorted(extract_parser_alias_tokens(raw)):
             tokens.append(alias_token)
         for token in TOKEN_RE.findall(raw):
+            if token.lower() in _UNIT_TOKENS:
+                continue
             normalized = transliterate_token(token)
             if normalized:
                 tokens.extend(expand_search_token_variants(normalized))
@@ -1738,11 +1743,16 @@ def extract_dimension_tags(*parts: object) -> set[str]:
     # Capture L=NNN without explicit mm unit (common in valve specs like КШЦП)
     for match in re.findall(r"\bl\s*=\s*([0-9]+(?:[.,][0-9]+)?)(?!\s*mm)(?=\s|$)", text):
         tags.add(f"lmm:{match.replace(',', '.')}")
-    for match in re.finditer(r"\b([0-9]+(?:[.,][0-9]+)?)\s*(?:mm|мм)\b", text):
+    for match in re.finditer(r"(?<![.,])([0-9]+(?:[.,][0-9]+)?)\s*(?:mm|мм)\b", text):
         prefix = text[max(0, match.start() - 6) : match.start()]
         if re.search(r"(?:\bl\s*=?\s*|\bl=)$", prefix):
             continue
         normalized = match.group(1).replace(",", ".")
+        try:
+            if float(normalized) < 10:
+                continue
+        except ValueError:
+            pass
         tags.add(f"dn:{normalized}")
         tags.add(f"od:{normalized}")
     for inch_value in iter_explicit_inch_values(raw_text):
@@ -1818,6 +1828,19 @@ def extract_dimension_tags(*parts: object) -> set[str]:
     if re.search(r"\b8\s+otverst", text):
         tags.add("hole:8")
     if re.search(r"\b(?:troinik|tee)\b", search_text):
+        # NxNxNxN pattern: DN1 x DN2 x DN3 x wall (compact order format)
+        for first, second, third, wall in re.findall(
+            r"(?<![a-zа-я0-9])(\d{2,4})\s*[xх]\s*(\d{2,4})\s*[xх]\s*(\d{2,4})\s*[xх]\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9])",
+            text,
+        ):
+            wall_f = float(wall.replace(",", "."))
+            if wall_f <= 12.0:
+                normalized_values = [normalize_measure_value(first), normalize_measure_value(second), normalize_measure_value(third)]
+                for value in normalized_values:
+                    tags.add(f"dn:{value}")
+                tags.add(f"tripledn:{normalize_multi_measure_tag(*normalized_values)}")
+                tags.add(f"wall:{normalize_measure_value(wall)}")
+        # NxNxN pattern: DN1 x DN2 x DN3 (no wall)
         for first, second, third in re.findall(
             r"\b(?:dn|d)?\s*(\d{2,4})\s*[xх/]\s*(\d{2,4})\s*[xх/]\s*(\d{2,4})\b",
             search_text,
@@ -1835,7 +1858,34 @@ def extract_dimension_tags(*parts: object) -> set[str]:
             tags.add(f"dn:{normalized_left}")
             tags.add(f"dn:{normalized_right}")
             tags.add(f"pairdn:{normalize_pair_tag(normalized_left, normalized_right)}")
+        # Infer tripledn for equal tees that only specify one OD value
+        if not any(t.startswith("tripledn:") for t in tags):
+            od_values = extract_tag_values(tags, "od:")
+            dn_values = extract_tag_values(tags, "dn:")
+            # Equal tee: single OD (or "равн"/equal keyword) → all 3 ports same
+            is_equal = re.search(r"\b(?:ravn|ravnoproh|equal)\b", search_text) or re.search(r"\bравн", raw_text)
+            if is_equal:
+                for v in od_values:
+                    tags.add(f"tripledn:{normalize_multi_measure_tag(v, v, v)}")
+                if not od_values:
+                    for v in dn_values:
+                        tags.add(f"tripledn:{normalize_multi_measure_tag(v, v, v)}")
     if re.search(r"\bpereh(?:od\w*)?\b", search_text):
+        # Compact order format: NxNxN where last is wall (e.g. "40x32x3.5 mm")
+        for dn1, dn2, wall in re.findall(
+            r"(?<![a-zа-я0-9])(\d{2,4})\s*[xх]\s*(\d{2,4})\s*[xх]\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9/])",
+            text,
+        ):
+            wall_f = float(wall.replace(",", "."))
+            if wall_f <= 12.0:
+                n_left = normalize_measure_value(dn1)
+                n_right = normalize_measure_value(dn2)
+                tags.add(f"dn:{n_left}")
+                tags.add(f"dn:{n_right}")
+                tags.add(f"od:{n_left}")
+                tags.add(f"od:{n_right}")
+                tags.add(f"wall:{normalize_measure_value(wall)}")
+                tags.add(f"pairdn:{normalize_pair_tag(n_left, n_right)}")
         for left, right in re.findall(
             r"\b(?:dn|d)?\s*(\d{2,4})\s*(?:[xх/]|-)\s*(\d{2,4})\b",
             search_text,
@@ -2669,7 +2719,7 @@ def detect_header(ws) -> tuple[int, dict[str, int], list[str]]:
     best_mapping: dict[str, int] = {}
     best_score = -1
     best_headers: list[str] = []
-    for row_index in range(1, min(ws.max_row, 12) + 1):
+    for row_index in range(1, min(ws.max_row, 30) + 1):
         values = [ws.cell(row=row_index, column=col).value for col in range(1, ws.max_column + 1)]
         score, mapping = score_header_row(values)
         if score > best_score:
@@ -3105,13 +3155,27 @@ class StockMatcher:
         order_dimensions = expand_dimension_values(group_dimension_tags(order.dimension_tags))
         stock_dimensions = expand_dimension_values(group_dimension_tags(stock.dimension_tags))
 
+        stock_families = extract_tag_values(stock.dimension_tags, "family:")
         for required_key in ("tripledn", "pairdn"):
             order_values = order_dimensions.get(required_key, set())
             if not order_values:
                 continue
             stock_values = stock_dimensions.get(required_key, set())
-            if not stock_values or not (order_values & stock_values):
-                return False
+            if stock_values and (order_values & stock_values):
+                continue
+            # Allow tees without tripledn if they share at least one DN/OD
+            if required_key == "tripledn" and "tee" in stock_families:
+                order_dns = order_dimensions.get("dn", set()) | order_dimensions.get("od", set())
+                stock_dns = stock_dimensions.get("dn", set()) | stock_dimensions.get("od", set())
+                if order_dns & stock_dns:
+                    continue
+            # Allow перехода without pairdn if they share at least one DN/OD
+            if required_key == "pairdn" and "perehod" in stock_families:
+                order_dns = order_dimensions.get("dn", set()) | order_dimensions.get("od", set())
+                stock_dns = stock_dimensions.get("dn", set()) | stock_dimensions.get("od", set())
+                if order_dns & stock_dns:
+                    continue
+            return False
         return True
 
     def _has_compatible_family_specific_subtypes(self, order: OrderLine, stock: StockItem) -> bool:
@@ -3779,10 +3843,19 @@ def match_orders(
         if needs_exhaustive:
             exhaustive_candidates = matcher.find_candidates_exhaustive(line, limit=5)
             exhaustive_kind, exhaustive_best, exhaustive_reason = matcher.classify(line, exhaustive_candidates)
-            candidates = exhaustive_candidates
-            match_kind = exhaustive_kind
-            best = exhaustive_best
-            reason = exhaustive_reason
+            # Only replace if exhaustive found a better result
+            exhaustive_score = exhaustive_best.score if exhaustive_best else 0.0
+            token_score = best.score if best else 0.0
+            exhaustive_better = (
+                (exhaustive_kind == "exact" and match_kind != "exact")
+                or (exhaustive_kind != "not_found" and match_kind == "not_found")
+                or exhaustive_score > token_score
+            )
+            if exhaustive_better:
+                candidates = exhaustive_candidates
+                match_kind = exhaustive_kind
+                best = exhaustive_best
+                reason = exhaustive_reason
         if match_kind == "exact" and best is not None:
             available_qty = min(line.requested_qty, best.stock.remaining)
             if available_qty > 0:
