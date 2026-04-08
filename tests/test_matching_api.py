@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+import asyncio
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -18,6 +19,7 @@ from matching_api import (  # noqa: E402
     SHARED_PASSWORD,
     AuthUser,
     STATUS_NOT_FOUND,
+    _extract_session_token,
     _find_all_stock_files,
     _manual_search_candidates,
     _parse_requested_quantity,
@@ -28,6 +30,9 @@ from matching_api import (  # noqa: E402
     _hash_password,
     _serialize_candidate,
     _update_row_quantity_inplace,
+    app,
+    login,
+    me,
 )
 from process_1c_orders import (  # noqa: E402
     Candidate,
@@ -512,6 +517,56 @@ class MatchingApiHelpersTest(unittest.TestCase):
         self.assertEqual(_parse_requested_quantity("2.5"), 2.5)
         with self.assertRaises(HTTPException):
             _parse_requested_quantity(0)
+
+
+class MatchingApiSimpleRequestFlowTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.user_directory = {
+            "anisovets": {
+                "username": "anisovets",
+                "display_name": "Анисовец",
+                "role": "manager",
+                "password_sha256": _hash_password("5956"),
+            }
+        }
+        self.original_loader = matching_api_module._load_user_directory
+        matching_api_module._load_user_directory = lambda: self.user_directory
+        matching_api_module._sessions.clear()
+
+    def tearDown(self) -> None:
+        matching_api_module._load_user_directory = self.original_loader
+        matching_api_module._sessions.clear()
+
+    def test_extract_session_token_prefers_query_token_over_header(self) -> None:
+        self.assertEqual(
+            _extract_session_token("Bearer header-token", "query-token"),
+            "query-token",
+        )
+        self.assertEqual(_extract_session_token("Bearer header-token", None), "header-token")
+
+    def test_login_accepts_text_plain_json_and_me_accepts_query_token(self) -> None:
+        class FakeRequest:
+            def __init__(self, body: str, content_type: str) -> None:
+                self._body = body.encode("utf-8")
+                self.headers = {"content-type": content_type}
+
+            async def json(self):
+                raise AssertionError("json() should not be used for text/plain login payload")
+
+            async def body(self):
+                return self._body
+
+            async def form(self):
+                raise AssertionError("form() should not be used for text/plain login payload")
+
+        payload = asyncio.run(
+            login(FakeRequest('{"username":"anisovets","password":"5956"}', "text/plain"))
+        )
+
+        self.assertTrue(payload.token)
+
+        me_payload = me(None, token=payload.token)
+        self.assertEqual(me_payload.username, "anisovets")
 
 
 if __name__ == "__main__":

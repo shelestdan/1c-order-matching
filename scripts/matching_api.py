@@ -27,7 +27,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, Header, UploadFile
+from fastapi import FastAPI, File, HTTPException, Header, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -259,15 +259,51 @@ def _authenticate_user(username: str, password: str, user_directory: dict[str, d
     )
 
 
-def _check_auth(authorization: str | None) -> AuthUser:
-    if not authorization:
-        raise HTTPException(401, "Authorization header required")
-    token = authorization.removeprefix("Bearer ").strip()
-    session = _sessions.get(token)
+def _extract_session_token(authorization: str | None, token: str | None = None) -> str:
+    query_token = str(token or "").strip()
+    if query_token:
+        return query_token
+    auth_header = str(authorization or "").strip()
+    if auth_header:
+        return auth_header.removeprefix("Bearer ").strip()
+    return ""
+
+
+def _check_auth(authorization: str | None, token: str | None = None) -> AuthUser:
+    session_token = _extract_session_token(authorization, token)
+    if not session_token:
+        raise HTTPException(401, "Authorization token required")
+    session = _sessions.get(session_token)
     if not session or session.expires_at < time.time():
-        _sessions.pop(token, None)
+        _sessions.pop(session_token, None)
         raise HTTPException(401, "Session expired or invalid")
     return session.user
+
+
+async def _parse_request_payload(request: Request) -> dict[str, Any]:
+    content_type = str(request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if content_type == "application/json":
+        payload = await request.json()
+        return payload if isinstance(payload, dict) else {}
+    if content_type == "text/plain":
+        raw = (await request.body()).decode("utf-8", errors="ignore").strip()
+        if not raw:
+            return {}
+        payload = json.loads(raw)
+        return payload if isinstance(payload, dict) else {}
+    if content_type in {"application/x-www-form-urlencoded", "multipart/form-data"}:
+        form = await request.form()
+        return {str(key): value for key, value in form.items()}
+    if not content_type:
+        return {}
+    raise HTTPException(415, f"Unsupported content type: {content_type}")
+
+
+def _coerce_login_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "username": str(payload.get("username") or "").strip(),
+        "password": str(payload.get("password") or ""),
+    }
 
 
 def _require_admin(user: AuthUser) -> None:
@@ -315,13 +351,15 @@ def health():
 
 
 @app.get("/api/me", response_model=UserResponse)
-def me(authorization: str | None = Header(None)):
-    user = _check_auth(authorization)
+def me(authorization: str | None = Header(None), token: str | None = Query(None)):
+    user = _check_auth(authorization, token)
     return UserResponse(**_serialize_user(user))
 
 
 @app.post("/api/login", response_model=LoginResponse)
-def login(body: LoginRequest):
+async def login(request: Request):
+    payload = _coerce_login_payload(await _parse_request_payload(request))
+    body = LoginRequest(**payload)
     user = _authenticate_user(body.username, body.password)
     token = secrets.token_urlsafe(32)
     _sessions[token] = SessionInfo(user=user, expires_at=time.time() + SESSION_TTL)
@@ -1695,8 +1733,12 @@ def _record_manual_selection_learning(
 
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...), authorization: str | None = Header(None)):
-    user = _check_auth(authorization)
+async def upload_file(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(None),
+    token: str | None = Query(None),
+):
+    user = _check_auth(authorization, token)
 
     job_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
     job_dir = ensure_output_dir(JOBS_DIR / job_id)
@@ -1749,8 +1791,8 @@ async def upload_file(file: UploadFile = File(...), authorization: str | None = 
 
 
 @app.get("/api/jobs")
-def list_jobs(authorization: str | None = Header(None)):
-    user = _check_auth(authorization)
+def list_jobs(authorization: str | None = Header(None), token: str | None = Query(None)):
+    user = _check_auth(authorization, token)
     # Also scan disk for jobs not in memory
     if JOBS_DIR.exists():
         for d in sorted(JOBS_DIR.iterdir(), reverse=True):
@@ -1768,8 +1810,8 @@ def list_jobs(authorization: str | None = Header(None)):
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str, authorization: str | None = Header(None)):
-    user = _check_auth(authorization)
+def get_job(job_id: str, authorization: str | None = Header(None), token: str | None = Query(None)):
+    user = _check_auth(authorization, token)
     data = _load_job(job_id)
     _ensure_job_access(user, data)
     return data
@@ -1781,8 +1823,14 @@ class ApproveRequest(BaseModel):
 
 
 @app.post("/api/jobs/{job_id}/approve")
-def approve_analogs(job_id: str, body: ApproveRequest, authorization: str | None = Header(None)):
-    user = _check_auth(authorization)
+async def approve_analogs(
+    job_id: str,
+    request: Request,
+    authorization: str | None = Header(None),
+    token: str | None = Query(None),
+):
+    user = _check_auth(authorization, token)
+    body = ApproveRequest(**(await _parse_request_payload(request)))
     data = _load_job(job_id)
     _ensure_job_access(user, data)
 
@@ -1830,8 +1878,14 @@ class ManualSearchRequest(BaseModel):
 
 
 @app.post("/api/jobs/{job_id}/search")
-def search_stock_for_row(job_id: str, body: ManualSearchRequest, authorization: str | None = Header(None)):
-    user = _check_auth(authorization)
+async def search_stock_for_row(
+    job_id: str,
+    request: Request,
+    authorization: str | None = Header(None),
+    token: str | None = Query(None),
+):
+    user = _check_auth(authorization, token)
+    body = ManualSearchRequest(**(await _parse_request_payload(request)))
     data = _load_job(job_id)
     _ensure_job_access(user, data)
     row = _find_row(data, body.row_id)
@@ -1872,8 +1926,14 @@ class ManualSelectRequest(BaseModel):
 
 
 @app.post("/api/jobs/{job_id}/select")
-def select_manual_candidate(job_id: str, body: ManualSelectRequest, authorization: str | None = Header(None)):
-    user = _check_auth(authorization)
+async def select_manual_candidate(
+    job_id: str,
+    request: Request,
+    authorization: str | None = Header(None),
+    token: str | None = Query(None),
+):
+    user = _check_auth(authorization, token)
+    body = ManualSelectRequest(**(await _parse_request_payload(request)))
     data = _load_job(job_id)
     _ensure_job_access(user, data)
     row = _find_row(data, body.row_id)
@@ -1933,13 +1993,15 @@ class RowQuantityUpdateRequest(BaseModel):
 
 
 @app.post("/api/jobs/{job_id}/rows/{row_id}/quantity")
-def update_row_quantity(
+async def update_row_quantity(
     job_id: str,
     row_id: str,
-    body: RowQuantityUpdateRequest,
+    request: Request,
     authorization: str | None = Header(None),
+    token: str | None = Query(None),
 ):
-    user = _check_auth(authorization)
+    user = _check_auth(authorization, token)
+    body = RowQuantityUpdateRequest(**(await _parse_request_payload(request)))
     data = _load_job(job_id)
     _ensure_job_access(user, data)
     if not _job_is_editable(data):
@@ -1957,8 +2019,8 @@ def update_row_quantity(
 
 
 @app.post("/api/jobs/{job_id}/export")
-def export_1c_file(job_id: str, authorization: str | None = Header(None)):
-    user = _check_auth(authorization)
+def export_1c_file(job_id: str, authorization: str | None = Header(None), token: str | None = Query(None)):
+    user = _check_auth(authorization, token)
     data = _load_job(job_id)
     _ensure_job_access(user, data)
 
@@ -2057,8 +2119,8 @@ def export_1c_file(job_id: str, authorization: str | None = Header(None)):
 
 
 @app.get("/api/admin/analytics")
-def admin_analytics(authorization: str | None = Header(None)):
-    user = _check_auth(authorization)
+def admin_analytics(authorization: str | None = Header(None), token: str | None = Query(None)):
+    user = _check_auth(authorization, token)
     _require_admin(user)
     store = _get_learning_store()
     payload = {

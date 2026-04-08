@@ -144,17 +144,24 @@ function updateUserUI() {
 
 /* ===== API helper ===== */
 async function apiFetch(path, method = 'GET', body = null) {
+  const url = new URL(API + path, window.location.href);
+  if (token) {
+    url.searchParams.set('token', token);
+  }
   const opts = {
     method,
-    headers: { 'Authorization': `Bearer ${token}` },
+    headers: {},
   };
   if (body && !(body instanceof FormData)) {
-    opts.headers['Content-Type'] = 'application/json';
+    opts.headers['Content-Type'] = 'text/plain;charset=UTF-8';
     opts.body = JSON.stringify(body);
   } else if (body instanceof FormData) {
     opts.body = body;
   }
-  const res = await fetch(API + path, opts);
+  if (!Object.keys(opts.headers).length) {
+    delete opts.headers;
+  }
+  const res = await fetch(url.toString(), opts);
   if (res.status === 401) {
     token = '';
     currentUser = null;
@@ -746,9 +753,12 @@ async function chooseCandidate(rowId, source, code, button) {
 async function exportFile() {
   if (!currentJob) return;
   try {
-    const res = await fetch(`${API}/api/jobs/${currentJob.job_id}/export`, {
+    const url = new URL(`${API}/api/jobs/${currentJob.job_id}/export`, window.location.href);
+    if (token) {
+      url.searchParams.set('token', token);
+    }
+    const res = await fetch(url.toString(), {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}` },
     });
     if (!res.ok) {
       const err = await res.json();
