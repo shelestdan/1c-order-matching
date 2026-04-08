@@ -765,14 +765,14 @@ async function exportFile() {
       throw new Error(err.detail || 'Ошибка экспорта');
     }
     const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
+    const objectUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
+    a.href = objectUrl;
     a.download = 'КП_для_1С.xlsx';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    URL.revokeObjectURL(objectUrl);
 
     const updated = await apiFetch(`/api/jobs/${currentJob.job_id}`);
     currentJob = { ...updated, job_id: currentJob.job_id };
