@@ -222,7 +222,7 @@ def detect_header_from_rows(rows: list[list[object]]) -> tuple[int, dict[str, in
     best_mapping: dict[str, int] = {}
     best_headers: list[str] = []
     best_score = -1
-    for row_index, row in enumerate(rows[:12]):
+    for row_index, row in enumerate(rows[:30]):
         score, mapping = score_header_row(row)
         if score > best_score:
             best_score = score
@@ -259,7 +259,7 @@ def read_docx_text(path: Path) -> str:
 
 def looks_like_header(line: str) -> bool:
     lowered = line.lower()
-    has_name = "наимен" in lowered or "материал" in lowered
+    has_name = "наимен" in lowered or "материал" in lowered or "товар" in lowered or "номенклат" in lowered or "продукц" in lowered
     has_qty = "колич" in lowered or "кол-во" in lowered or "кол во" in lowered or "qty" in lowered
     has_position = "позиц" in lowered
     return (

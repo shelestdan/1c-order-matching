@@ -337,7 +337,13 @@ function displayRemainingQty(row) {
     return formatQty(row.matched_stock_qty);
   }
   if (APPROVAL_STATUSES.has(row.status) && row.analogs && row.analogs.length) {
-    return formatQty(row.analogs[0].stock_qty ?? row.analogs[0].remaining);
+    const sorted = [...row.analogs].sort((a, b) => {
+      const aEK = a.source_label === 'ЭК' ? 0 : 1;
+      const bEK = b.source_label === 'ЭК' ? 0 : 1;
+      if (aEK !== bEK) return aEK - bEK;
+      return (b.score || 0) - (a.score || 0);
+    });
+    return formatQty(sorted[0].stock_qty ?? sorted[0].remaining);
   }
   return formatQty(row.available_qty);
 }
@@ -363,7 +369,14 @@ function buildMatchCell(row) {
             ${depletedNote}`;
   }
   if (APPROVAL_STATUSES.has(row.status) && row.analogs && row.analogs.length) {
-    const a = row.analogs[0];
+    // Prefer ЭК item if available
+    const sorted = [...row.analogs].sort((a, b) => {
+      const aEK = a.source_label === 'ЭК' ? 0 : 1;
+      const bEK = b.source_label === 'ЭК' ? 0 : 1;
+      if (aEK !== bEK) return aEK - bEK;
+      return (b.score || 0) - (a.score || 0);
+    });
+    const a = sorted[0];
     const zeroStock = a.remaining === 0 || a.remaining === '0';
     return `<div class="match-name">${esc(a.name)} ${warehouseBadge(a.source_label)} ${managerChoiceBadge(a.manager_choice)}</div>
             <div class="match-code">${esc(a.code_1c)}</div>
@@ -459,9 +472,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeModal();
 });
 
-document.getElementById('analog-modal').addEventListener('click', (e) => {
-  if (e.target === document.getElementById('analog-modal')) closeModal();
-});
+// Modal closes only via X button or Escape — not on backdrop click
 
 async function selectAnalog(rowId, code) {
   pendingApprovals[rowId] = code;
@@ -490,6 +501,15 @@ async function selectAnalog(rowId, code) {
 function renderCandidateList(containerId, candidates, rowId, source) {
   const container = document.getElementById(containerId);
   container.innerHTML = '';
+  // Sort ЭК items first, then by score descending
+  if (candidates && candidates.length) {
+    candidates = [...candidates].sort((a, b) => {
+      const aEK = a.source_label === 'ЭК' ? 0 : 1;
+      const bEK = b.source_label === 'ЭК' ? 0 : 1;
+      if (aEK !== bEK) return aEK - bEK;
+      return (b.score || 0) - (a.score || 0);
+    });
+  }
   if (!candidates || !candidates.length) {
     const empty = document.createElement('div');
     empty.className = 'empty-state';
