@@ -5,9 +5,11 @@ import sys
 import tempfile
 import unittest
 import asyncio
+import io
 from pathlib import Path
 
 from fastapi import HTTPException
+from fastapi import UploadFile
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT / "scripts"
@@ -33,6 +35,7 @@ from matching_api import (  # noqa: E402
     app,
     login,
     me,
+    upload_file,
 )
 from process_1c_orders import (  # noqa: E402
     Candidate,
@@ -567,6 +570,61 @@ class MatchingApiSimpleRequestFlowTest(unittest.TestCase):
 
         me_payload = me(None, token=payload.token)
         self.assertEqual(me_payload.username, "anisovets")
+
+    def test_upload_file_runs_pipeline_in_threadpool_on_cache_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_jobs_dir = matching_api_module.JOBS_DIR
+            original_check_auth = matching_api_module._check_auth
+            original_cache_key = matching_api_module._pipeline_cache_key
+            original_run_pipeline = matching_api_module._run_pipeline
+            original_run_in_threadpool = matching_api_module.run_in_threadpool
+            original_save_job = matching_api_module._save_job
+            original_jobs = matching_api_module._jobs
+            original_cache = matching_api_module._pipeline_result_cache
+
+            called = {"threadpool": False, "pipeline": False}
+
+            async def fake_run_in_threadpool(fn, *args, **kwargs):
+                called["threadpool"] = True
+                return fn(*args, **kwargs)
+
+            def fake_run_pipeline(upload_path, job_dir):
+                called["pipeline"] = True
+                return {
+                    "total_rows": 1,
+                    "status_counts": {"Найдено полностью": 1},
+                    "rows": [],
+                }
+
+            matching_api_module.JOBS_DIR = Path(tmp_dir)
+            matching_api_module._check_auth = lambda authorization, token=None: AuthUser(
+                username="anisovets",
+                display_name="Анисовец",
+                role="manager",
+            )
+            matching_api_module._pipeline_cache_key = lambda upload_path: "cache-key"
+            matching_api_module._run_pipeline = fake_run_pipeline
+            matching_api_module.run_in_threadpool = fake_run_in_threadpool
+            matching_api_module._save_job = lambda job_id, data: None
+            matching_api_module._jobs = {}
+            matching_api_module._pipeline_result_cache = {"scope": None, "entries": {}}
+
+            try:
+                upload = UploadFile(filename="order.xlsx", file=io.BytesIO(b"fake"))
+                result = asyncio.run(upload_file(upload, None, "query-token"))
+            finally:
+                matching_api_module.JOBS_DIR = original_jobs_dir
+                matching_api_module._check_auth = original_check_auth
+                matching_api_module._pipeline_cache_key = original_cache_key
+                matching_api_module._run_pipeline = original_run_pipeline
+                matching_api_module.run_in_threadpool = original_run_in_threadpool
+                matching_api_module._save_job = original_save_job
+                matching_api_module._jobs = original_jobs
+                matching_api_module._pipeline_result_cache = original_cache
+
+        self.assertTrue(called["threadpool"])
+        self.assertTrue(called["pipeline"])
+        self.assertEqual(result["total_rows"], 1)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, Header, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -1754,7 +1755,7 @@ async def upload_file(
         result = copy.deepcopy(cached_result)
     else:
         try:
-            result = _run_pipeline(upload_path, job_dir)
+            result = await run_in_threadpool(_run_pipeline, upload_path, job_dir)
         except Exception as exc:
             raise HTTPException(500, f"Pipeline error: {exc}")
         _pipeline_result_cache["entries"][cache_key] = copy.deepcopy(result)
