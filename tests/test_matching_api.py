@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,10 +13,12 @@ SCRIPTS_DIR = ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import matching_api as matching_api_module  # noqa: E402
 from matching_api import (  # noqa: E402
     SHARED_PASSWORD,
     AuthUser,
     STATUS_NOT_FOUND,
+    _find_all_stock_files,
     _manual_search_candidates,
     _parse_requested_quantity,
     _authenticate_user,
@@ -375,6 +379,107 @@ class MatchingApiHelpersTest(unittest.TestCase):
         self.assertEqual(results[0].stock.code_1c, "RED")
         self.assertIn("manual_context", results[0].retrieval_paths)
         self.assertGreater(results[0].feature_scores["row_context_score"], 0.0)
+
+    def test_manual_search_shortlists_candidates_before_full_stock_scan(self) -> None:
+        def make_stock(row_index: int, code: str, name: str) -> StockItem:
+            search_text = build_search_text(name)
+            dimension_tags = (
+                extract_dimension_tags(name)
+                | extract_family_tags(name)
+                | extract_material_tags_from_search_text(search_text)
+            )
+            search_text = augment_search_text_with_dimension_tags(search_text, dimension_tags)
+            tokens = extract_tokens(search_text)
+            return StockItem(
+                row_index=row_index,
+                code_1c=code,
+                name=name,
+                print_name=name,
+                product_type="",
+                sale_price="",
+                stop_price="",
+                plan_price="",
+                quantity=20.0,
+                remaining=20.0,
+                search_text=search_text,
+                search_tokens=tokens,
+                key_tokens=extract_key_tokens(tokens),
+                root_tokens=extract_root_tokens(tokens),
+                code_tokens=set(),
+                dimension_tags=dimension_tags,
+            )
+
+        row_name = "Переход ст. приварной 89х40х3,5 мм"
+        row_search_text = build_search_text(row_name)
+        row_dimension_tags = (
+            extract_dimension_tags(row_name)
+            | extract_family_tags(row_name)
+            | extract_material_tags_from_search_text(row_search_text)
+        )
+        row_search_text = augment_search_text_with_dimension_tags(row_search_text, row_dimension_tags)
+        row_tokens = extract_tokens(row_search_text)
+        row = {
+            "id": "row-1",
+            "name": row_name,
+            "mark": "",
+            "vendor": "",
+            "unit": "шт",
+            "requested_qty": 3.0,
+            "raw_query": row_name,
+            "search_text": row_search_text,
+            "key_tokens": sorted(extract_key_tokens(row_tokens)),
+            "root_tokens": sorted(extract_root_tokens(row_tokens)),
+            "dimension_tags": sorted(row_dimension_tags),
+        }
+
+        stocks = [make_stock(1, "RED", "Переход П-2- 89х4,0 - 57х3,5 Ст.20 ГОСТ 17378")]
+        stocks.extend(
+            make_stock(index + 2, f"IRR-{index}", f"Муфта латунная DN{15 + index % 20}")
+            for index in range(48)
+        )
+        matcher = StockMatcher(stocks)
+        original_score_candidate = matcher.score_candidate
+        score_calls = 0
+
+        def counted_score_candidate(*args, **kwargs):
+            nonlocal score_calls
+            score_calls += 1
+            return original_score_candidate(*args, **kwargs)
+
+        matcher.score_candidate = counted_score_candidate  # type: ignore[assignment]
+
+        results = _manual_search_candidates(matcher, row, "89", limit=5)
+
+        self.assertTrue(results)
+        self.assertLess(score_calls, len(matcher.stock_items) * 2)
+
+    def test_find_all_stock_files_prefers_latest_file_per_label(self) -> None:
+        original_stock_dir = matching_api_module.STOCK_DIR
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stock_dir = Path(tmp_dir)
+            old_ek = stock_dir / "остатки_old.xlsm"
+            new_ek = stock_dir / "остатки_new.xlsm"
+            santeh = stock_dir / "santeh_base.xlsm"
+            labels = stock_dir / "stock_labels.json"
+
+            for path in (old_ek, new_ek, santeh):
+                path.write_bytes(b"test")
+            os.utime(old_ek, (1_700_000_000, 1_700_000_000))
+            os.utime(new_ek, (1_800_000_000, 1_800_000_000))
+            os.utime(santeh, (1_750_000_000, 1_750_000_000))
+            labels.write_text('{"santeh_base.xlsm": "Сантехкомплект"}', encoding="utf-8")
+
+            matching_api_module.STOCK_DIR = stock_dir
+            try:
+                result = _find_all_stock_files()
+            finally:
+                matching_api_module.STOCK_DIR = original_stock_dir
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0][0].name, "остатки_new.xlsm")
+        self.assertEqual(result[0][1], "ЭК")
+        self.assertEqual(result[1][0].name, "santeh_base.xlsm")
+        self.assertEqual(result[1][1], "Сантехкомплект")
 
     def test_update_row_quantity_inplace_rejects_over_available_stock(self) -> None:
         row = {

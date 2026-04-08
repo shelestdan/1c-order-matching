@@ -91,6 +91,9 @@ MANUAL_SEARCH_MIN_SCORE = 28.0
 MANUAL_SEARCH_MIN_OVERLAP = 0.12
 MANUAL_SEARCH_MIN_SOFT_OVERLAP = 0.18
 MANUAL_SEARCH_MIN_DIMENSION_BONUS = 6.0
+MANUAL_SEARCH_QUERY_TOKEN_LIMIT = 8
+MANUAL_SEARCH_MAX_FRAGMENT_MATCHES = 320
+MANUAL_SEARCH_MAX_SCORE_CANDIDATES = 1200
 
 STOCK_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls"}
 STOCK_LABELS_FILE = "stock_labels.json"
@@ -337,6 +340,22 @@ def _find_all_stock_files() -> list[tuple[Path, str]]:
     stock_labels.json in the stock directory. Files without explicit
     labels get an empty string.
     """
+    def infer_label(path: Path, explicit_label: str) -> str:
+        label = str(explicit_label or "").strip()
+        if label:
+            return label
+        name = path.stem.lower()
+        if "сантех" in name or "santeh" in name:
+            return "Сантехкомплект"
+        if "остат" in name or "эк" in name or re.search(r"(^|[_\\-\\s])ek($|[_\\-\\s])", name):
+            return "ЭК"
+        return "ЭК"
+
+    def label_sort_key(item: tuple[Path, str]) -> tuple[int, str]:
+        _, label = item
+        priority = {"ЭК": 0, "Сантехкомплект": 1}
+        return (priority.get(label, 9), item[0].name.lower())
+
     labels_path = STOCK_DIR / STOCK_LABELS_FILE
     labels: dict[str, str] = {}
     if labels_path.exists():
@@ -346,11 +365,14 @@ def _find_all_stock_files() -> list[tuple[Path, str]]:
             pass
 
     candidates = sorted(STOCK_DIR.glob("*.*"), key=lambda p: p.stat().st_mtime, reverse=True)
-    result: list[tuple[Path, str]] = []
+    latest_per_label: dict[str, tuple[Path, str]] = {}
     for c in candidates:
         if c.suffix.lower() in STOCK_EXTENSIONS and c.name != STOCK_LABELS_FILE:
-            label = labels.get(c.name, "")
-            result.append((c, label))
+            label = infer_label(c, labels.get(c.name, ""))
+            current = latest_per_label.get(label)
+            if current is None or c.stat().st_mtime > current[0].stat().st_mtime:
+                latest_per_label[label] = (c, label)
+    result = sorted(latest_per_label.values(), key=label_sort_key)
     if not result:
         raise HTTPException(500, "No stock file found in inputs/stock/")
     return result
@@ -887,6 +909,83 @@ def _normalize_manual_code(value: str) -> str:
     return re.sub(r"[^0-9a-zа-я]+", "", value.lower())
 
 
+def _merge_manual_search_pool(
+    candidate_sources: dict[int, set[str]],
+    pool: dict[int, tuple[str, ...]],
+    marker: str,
+) -> None:
+    for stock_index, paths in pool.items():
+        current = candidate_sources.setdefault(int(stock_index), set())
+        current.add(marker)
+        current.update(str(path) for path in paths if str(path).strip())
+
+
+def _build_manual_search_candidate_pool(
+    matcher: StockMatcher,
+    manual_order: OrderLine,
+    context_order: OrderLine,
+    query: str,
+) -> dict[int, tuple[str, ...]]:
+    candidate_sources: dict[int, set[str]] = {}
+    _merge_manual_search_pool(candidate_sources, matcher.generate_candidate_pool(manual_order), "manual_query_pool")
+    _merge_manual_search_pool(candidate_sources, matcher.generate_candidate_pool(context_order), "row_context_pool")
+
+    query_lower = query.strip().lower()
+    normalized_code_query = _normalize_manual_code(query)
+    if normalized_code_query:
+        for stock_index in matcher.normalized_code_index.get(normalized_code_query, []):
+            candidate_sources.setdefault(int(stock_index), set()).add("manual_exact_code")
+
+    query_tokens = extract_tokens(build_search_text(query))
+    informative_tokens = sorted(
+        query_tokens,
+        key=lambda token: (len(matcher.search_token_index.get(token, [])) or 100000, -len(token), token),
+    )
+    for token in informative_tokens[:MANUAL_SEARCH_QUERY_TOKEN_LIMIT]:
+        matches = matcher.search_token_index.get(token, [])
+        if not matches:
+            continue
+        for stock_index in matches:
+            candidate_sources.setdefault(int(stock_index), set()).add("manual_query_token")
+
+    if query_lower and (len(query_lower) >= 4 or normalized_code_query):
+        fragment_hits = 0
+        for stock_index, stock in enumerate(matcher.stock_items):
+            stock_code_lower = (stock.code_1c or "").lower()
+            stock_name_lower = (stock.name or "").lower()
+            normalized_stock_code = _normalize_manual_code(stock.code_1c or "")
+            if (
+                stock_code_lower == query_lower
+                or (normalized_code_query and normalized_stock_code == normalized_code_query)
+                or query_lower in stock_code_lower
+                or query_lower in stock_name_lower
+            ):
+                candidate_sources.setdefault(int(stock_index), set()).add("manual_fragment")
+                fragment_hits += 1
+                if fragment_hits >= MANUAL_SEARCH_MAX_FRAGMENT_MATCHES:
+                    break
+
+    ranked_pool = sorted(
+        candidate_sources.items(),
+        key=lambda item: (
+            "manual_exact_code" in item[1],
+            "manual_fragment" in item[1],
+            "memory" in item[1],
+            "code" in item[1],
+            "family" in item[1],
+            "structure" in item[1],
+            len(item[1]),
+            matcher.stock_items[item[0]].remaining > 0,
+            matcher.stock_items[item[0]].remaining,
+        ),
+        reverse=True,
+    )
+    return {
+        stock_index: tuple(sorted(paths))
+        for stock_index, paths in ranked_pool[:MANUAL_SEARCH_MAX_SCORE_CANDIDATES]
+    }
+
+
 def _manual_search_candidates(
     matcher: StockMatcher,
     row: dict[str, Any],
@@ -897,11 +996,13 @@ def _manual_search_candidates(
     context_order = _build_row_context_order(row)
     query_lower = query.strip().lower()
     normalized_code_query = _normalize_manual_code(query)
+    candidate_pool = _build_manual_search_candidate_pool(matcher, manual_order, context_order, query)
     ranked: list[Candidate] = []
 
-    for stock in matcher.stock_items:
-        query_candidate = matcher.score_candidate(manual_order, stock)
-        context_candidate = matcher.score_candidate(context_order, stock)
+    for stock_index, retrieval_paths in candidate_pool.items():
+        stock = matcher.stock_items[int(stock_index)]
+        query_candidate = matcher.score_candidate(manual_order, stock, retrieval_paths=retrieval_paths)
+        context_candidate = matcher.score_candidate(context_order, stock, retrieval_paths=retrieval_paths)
         reasons = list(query_candidate.reasons)
         score = query_candidate.score
 
@@ -943,7 +1044,14 @@ def _manual_search_candidates(
             reasons.append("совпадение по фрагменту кода/названия")
 
         retrieval_paths = tuple(
-            dict.fromkeys([*getattr(query_candidate, "retrieval_paths", ()), *getattr(context_candidate, "retrieval_paths", ()), "manual_query", "manual_context"])
+            dict.fromkeys(
+                [
+                    *getattr(query_candidate, "retrieval_paths", ()),
+                    *getattr(context_candidate, "retrieval_paths", ()),
+                    "manual_query",
+                    "manual_context",
+                ]
+            )
         )
         feature_scores = dict(getattr(query_candidate, "feature_scores", {}) or {})
         feature_scores.update(
