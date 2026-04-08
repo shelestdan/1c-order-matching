@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from openpyxl import Workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT / "scripts"
@@ -12,9 +15,27 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from document_text_extractor import ExtractionLine, ExtractionResult
 import normalize_client_requests as ncr
+from process_1c_orders import load_order_lines
 
 
 class NormalizeDocumentRequestTest(unittest.TestCase):
+    def test_detect_header_from_rows_merges_two_line_header(self) -> None:
+        rows = [
+            ["Позиция", "Наименование", "", ""],
+            ["", "материала", "Ед. изм.", "Количество"],
+            ["1", "Фланец Ду40", "шт", "4"],
+            ["2", "Тройник Ду32", "шт", "2"],
+        ]
+
+        header_index, columns, headers = ncr.detect_header_from_rows(rows)
+
+        self.assertEqual(header_index, 1)
+        self.assertEqual(columns["position"], 1)
+        self.assertEqual(columns["name"], 2)
+        self.assertEqual(columns["unit"], 3)
+        self.assertEqual(columns["qty"], 4)
+        self.assertIn("материала", headers[1])
+
     def test_merge_wrapped_ocr_lines_combines_multiline_table_item(self) -> None:
         merged = ncr.merge_wrapped_ocr_lines(
             "Кран шаровой приварной\n"
@@ -83,6 +104,28 @@ class NormalizeDocumentRequestTest(unittest.TestCase):
         self.assertEqual(parsed[0].quantity, 16.0)
         self.assertEqual(parsed[0].unit, "шт")
         self.assertIn("Фланец плоский", parsed[0].name)
+
+    def test_load_order_lines_skips_normalized_service_sheets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "normalized.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Заявка"
+            ws.append(["Позиция", "Наименование", "Ед. изм.", "Количество"])
+            ws.append(["1", "Фланец Ду40", "шт", 2])
+            issues = wb.create_sheet("Проблемы")
+            issues.append(["Файл", "Источник", "Исходный текст", "Причина"])
+            issues.append(["demo.xlsx", "ocr:1", "мусор", "нет количества"])
+            summary = wb.create_sheet("Сводка")
+            summary.append(["Параметр", "Значение"])
+            summary.append(["Распознано строк", 1])
+            wb.save(path)
+
+            lines = load_order_lines(path)
+
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(lines[0].sheet_name, "Заявка")
+            self.assertEqual(lines[0].name, "Фланец Ду40")
 
 
 if __name__ == "__main__":

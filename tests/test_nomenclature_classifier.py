@@ -714,6 +714,7 @@ class HybridNomenclatureClassifierTest(unittest.TestCase):
 
         self.assertTrue(is_exact_pipe_candidate(order, exact_candidate))
         self.assertFalse(is_exact_pipe_candidate(order, galvanized_candidate))
+        self.assertGreater(exact_candidate.feature_scores["family_profile_bonus"], 0.0)
         kind, best, reason = matcher.classify(order, [exact_candidate, galvanized_candidate])
         self.assertEqual(kind, "exact")
         self.assertEqual(best.stock.code_1c, "PIPE")
@@ -786,6 +787,219 @@ class HybridNomenclatureClassifierTest(unittest.TestCase):
         self.assertGreater(exact_candidate.score, wrong_candidate.score)
         self.assertTrue(matcher._has_required_dimension_matches(order, exact_stock))
         self.assertFalse(matcher._has_required_dimension_matches(order, wrong_stock))
+
+    def test_candidate_has_retrieval_paths_and_feature_scores(self) -> None:
+        order_name = "Фланец Ду40 Ру16 Ст20 ГОСТ 33259"
+        order_search_text = build_search_text(order_name)
+        order_tokens = extract_tokens(order_search_text)
+        order = OrderLine(
+            source_file="demo.xlsx",
+            sheet_name="Sheet1",
+            source_row=1,
+            headers=[],
+            row_values=[],
+            position="1",
+            name=order_name,
+            mark="",
+            supplier_code="",
+            vendor="",
+            unit="шт",
+            requested_qty=2.0,
+            search_text=order_search_text,
+            search_tokens=order_tokens,
+            key_tokens=extract_key_tokens(order_tokens),
+            root_tokens=extract_root_tokens(order_tokens),
+            code_tokens=set(),
+            dimension_tags=(
+                extract_dimension_tags(order_name)
+                | extract_family_tags(order_name)
+                | extract_material_tags_from_search_text(order_search_text)
+            ),
+            raw_query=order_name,
+            classification=None,
+        )
+
+        stock_name = "Фланец плоский Ду40 Ру16 Ст20 ГОСТ 33259"
+        stock_search_text = build_search_text(stock_name)
+        stock_tokens = extract_tokens(stock_search_text)
+        stock = StockItem(
+            row_index=1,
+            code_1c="FL-40",
+            name=stock_name,
+            print_name=stock_name,
+            product_type="",
+            sale_price="",
+            stop_price="",
+            plan_price="",
+            quantity=5.0,
+            remaining=5.0,
+            search_text=stock_search_text,
+            search_tokens=stock_tokens,
+            key_tokens=extract_key_tokens(stock_tokens),
+            root_tokens=extract_root_tokens(stock_tokens),
+            code_tokens=set(),
+            dimension_tags=(
+                extract_dimension_tags(stock_name)
+                | extract_family_tags(stock_name)
+                | extract_material_tags_from_search_text(stock_search_text)
+            ),
+        )
+
+        matcher = StockMatcher([stock])
+        candidates = matcher.find_candidates(order, limit=3)
+
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+        self.assertIn("structure", candidate.retrieval_paths)
+        self.assertIn("material", candidate.retrieval_paths)
+        self.assertTrue(any(path in candidate.retrieval_paths for path in ("token", "root", "dimension")))
+        self.assertGreater(candidate.feature_scores["family_match"], 0.0)
+        self.assertGreater(candidate.feature_scores["material_match"], 0.0)
+        self.assertEqual(candidate.feature_scores["dn_exact"], 1.0)
+        self.assertEqual(candidate.feature_scores["pn_exact"], 1.0)
+
+    def test_partial_perehod_side_match_stays_candidate(self) -> None:
+        order_name = "Переход ст. приварной 57х40х3,5 мм"
+        classification = self.classifier.classify(order_name)
+        classifier_hint = " ".join(classification.normalized.canonical_tokens)
+        order_search_text = build_search_text(order_name, classifier_hint)
+        order_dimension_tags = (
+            extract_dimension_tags(order_name)
+            | extract_family_tags(order_name, classifier_hint)
+            | extract_parser_hint_tags(order_name, classifier_hint)
+            | extract_material_tags_from_search_text(order_search_text)
+        )
+        order_search_text = augment_search_text_with_dimension_tags(order_search_text, order_dimension_tags)
+        order_tokens = extract_tokens(order_search_text)
+        order = OrderLine(
+            source_file="demo.xlsx",
+            sheet_name="Sheet1",
+            source_row=1,
+            headers=[],
+            row_values=[],
+            position="1",
+            name=order_name,
+            mark="",
+            supplier_code="",
+            vendor="",
+            unit="шт",
+            requested_qty=1.0,
+            search_text=order_search_text,
+            search_tokens=order_tokens,
+            key_tokens=extract_key_tokens(order_tokens),
+            root_tokens=extract_root_tokens(order_tokens),
+            code_tokens=set(),
+            dimension_tags=order_dimension_tags,
+            raw_query=order_name,
+            classification=classification,
+        )
+
+        stock_name = "Переход П-2- 89х4,0 - 57х3,5 Ст.20 ГОСТ 17378"
+        stock_search_text = build_search_text(stock_name)
+        stock_dimension_tags = (
+            extract_dimension_tags(stock_name)
+            | extract_family_tags(stock_name)
+            | extract_parser_hint_tags(stock_name)
+            | extract_material_tags_from_search_text(stock_search_text)
+        )
+        stock_search_text = augment_search_text_with_dimension_tags(stock_search_text, stock_dimension_tags)
+        stock_tokens = extract_tokens(stock_search_text)
+        stock = StockItem(
+            row_index=1,
+            code_1c="RED-89-57",
+            name=stock_name,
+            print_name=stock_name,
+            product_type="",
+            sale_price="",
+            stop_price="",
+            plan_price="",
+            quantity=5.0,
+            remaining=5.0,
+            search_text=stock_search_text,
+            search_tokens=stock_tokens,
+            key_tokens=extract_key_tokens(stock_tokens),
+            root_tokens=extract_root_tokens(stock_tokens),
+            code_tokens=set(),
+            dimension_tags=stock_dimension_tags,
+        )
+
+        matcher = StockMatcher([stock])
+        self.assertTrue(matcher._has_required_dimension_matches(order, stock))
+        candidate = matcher.find_candidates(order, limit=1)[0]
+        self.assertGreater(candidate.feature_scores["family_profile_bonus"], 0.0)
+        kind, best, _ = matcher.classify(order, [candidate])
+        self.assertEqual(kind, "analog")
+        self.assertIsNotNone(best)
+
+    def test_transition_tee_partial_match_beats_equal_tee(self) -> None:
+        order_name = "Тройник ст. приварной 89х57х89х3,5 мм"
+        order_search_text = build_search_text(order_name)
+        order_tokens = extract_tokens(order_search_text)
+        order = OrderLine(
+            source_file="demo.xlsx",
+            sheet_name="Sheet1",
+            source_row=1,
+            headers=[],
+            row_values=[],
+            position="1",
+            name=order_name,
+            mark="",
+            supplier_code="",
+            vendor="",
+            unit="шт",
+            requested_qty=1.0,
+            search_text=order_search_text,
+            search_tokens=order_tokens,
+            key_tokens=extract_key_tokens(order_tokens),
+            root_tokens=extract_root_tokens(order_tokens),
+            code_tokens=set(),
+            dimension_tags=(
+                extract_dimension_tags(order_name)
+                | extract_family_tags(order_name)
+                | extract_material_tags_from_search_text(order_search_text)
+            ),
+            raw_query=order_name,
+            classification=None,
+        )
+
+        def make_stock(row_index: int, code: str, name: str) -> StockItem:
+            stock_search_text = build_search_text(name)
+            stock_tokens = extract_tokens(stock_search_text)
+            return StockItem(
+                row_index=row_index,
+                code_1c=code,
+                name=name,
+                print_name=name,
+                product_type="",
+                sale_price="",
+                stop_price="",
+                plan_price="",
+                quantity=10.0,
+                remaining=10.0,
+                search_text=stock_search_text,
+                search_tokens=stock_tokens,
+                key_tokens=extract_key_tokens(stock_tokens),
+                root_tokens=extract_root_tokens(stock_tokens),
+                code_tokens=set(),
+                dimension_tags=(
+                    extract_dimension_tags(name)
+                    | extract_family_tags(name)
+                    | extract_material_tags_from_search_text(stock_search_text)
+                ),
+            )
+
+        reducing_stock = make_stock(1, "TEE-RED", "Тройник ст перех Дн89х76-3,5х3,5 (Ду80х65) HMCX")
+        equal_stock = make_stock(2, "TEE-EQUAL", "Тройник ст 89х3,5")
+        matcher = StockMatcher([equal_stock, reducing_stock])
+
+        self.assertTrue(matcher._has_required_dimension_matches(order, reducing_stock))
+        reducing_candidate = matcher.score_candidate(order, reducing_stock)
+        equal_candidate = matcher.score_candidate(order, equal_stock)
+        self.assertGreater(
+            reducing_candidate.feature_scores["family_profile_bonus"],
+            equal_candidate.feature_scores["family_profile_bonus"],
+        )
+        self.assertGreater(reducing_candidate.score, equal_candidate.score)
 
     def test_dimension_conflict_candidates_are_filtered_from_analogs(self) -> None:
         matcher = StockMatcher([])
@@ -1355,6 +1569,7 @@ class HybridNomenclatureClassifierTest(unittest.TestCase):
         kind, best, reason = matcher.classify(order, [threaded_candidate, plain_candidate])
 
         self.assertGreaterEqual(threaded_candidate.score, plain_candidate.score)
+        self.assertGreater(plain_candidate.feature_scores["family_profile_bonus"], threaded_candidate.feature_scores["family_profile_bonus"])
         self.assertEqual(kind, "exact")
         self.assertIsNotNone(best)
         self.assertEqual(best.stock.code_1c, "PROAQUA")

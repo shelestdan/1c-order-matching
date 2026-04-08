@@ -31,11 +31,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from learning_store import LearningStore
 from normalize_client_requests import ensure_output_dir, normalize_request_file
 from process_1c_orders import (
     Candidate,
     DEFAULT_MANUAL_SELECTION_MEMORY_PATH,
     DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH,
+    LEGACY_MANUAL_SELECTION_MEMORY_PATH,
     OrderLine,
     PARSER_HINTS_PATH,
     STATUS_NOT_FOUND,
@@ -43,6 +45,7 @@ from process_1c_orders import (
     SUBSTITUTION_POLICY_PATH,
     augment_search_text_with_dimension_tags,
     build_search_text,
+    build_structural_query_keys,
     clone_stock_items,
     extract_code_tokens,
     extract_dimension_tags,
@@ -52,6 +55,7 @@ from process_1c_orders import (
     extract_parser_hint_tags,
     extract_root_tokens,
     extract_tokens,
+    load_default_manual_selection_memory,
     load_order_lines,
     load_manual_selection_memory,
     load_reviewed_analog_decisions,
@@ -70,6 +74,7 @@ STOCK_DIR = Path(__file__).resolve().parent.parent / "inputs" / "stock"
 JOBS_DIR = Path(__file__).resolve().parent.parent / "outputs" / "web_jobs"
 DEFAULT_USER_DIRECTORY_PATH = DATA_DIR / "users.json"
 DEFAULT_EXPORT_AUDIT_PATH = DATA_DIR / "export_activity_log.json"
+DEFAULT_LEARNING_DB_PATH = DEFAULT_MANUAL_SELECTION_MEMORY_PATH
 
 # Simple shared password — override via env var MATCHING_PASSWORD
 SHARED_PASSWORD = os.environ.get("MATCHING_PASSWORD", "demo2026")
@@ -112,6 +117,8 @@ _manual_search_cache: dict[str, Any] = {
     "scope": None,
     "entries": {},
 }
+
+_learning_store: LearningStore | None = None
 
 # ---------------------------------------------------------------------------
 # App
@@ -161,6 +168,34 @@ def _export_audit_path() -> Path:
     if configured:
         return Path(configured).expanduser().resolve()
     return DEFAULT_EXPORT_AUDIT_PATH
+
+
+def _is_db_path(path: Path) -> bool:
+    return path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}
+
+
+def _learning_db_path() -> Path:
+    configured = os.environ.get("LEARNING_DB_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    railway_mount_path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if railway_mount_path:
+        return (Path(railway_mount_path).expanduser().resolve() / "learning_store.db")
+    legacy_configured = os.environ.get("MANUAL_SELECTION_MEMORY_PATH", "").strip()
+    if legacy_configured:
+        candidate = Path(legacy_configured).expanduser().resolve()
+        if _is_db_path(candidate):
+            return candidate
+    return DEFAULT_LEARNING_DB_PATH
+
+
+def _legacy_manual_selection_path() -> Path:
+    configured = os.environ.get("MANUAL_SELECTION_MEMORY_PATH", "").strip()
+    if configured:
+        candidate = Path(configured).expanduser().resolve()
+        if not _is_db_path(candidate):
+            return candidate
+    return LEGACY_MANUAL_SELECTION_MEMORY_PATH
 
 
 def _serialize_user(user: AuthUser) -> dict[str, Any]:
@@ -329,10 +364,7 @@ def _stock_fingerprint(stock_files: list[tuple[Path, str]]) -> str:
 
 
 def _manual_selection_memory_path() -> Path:
-    configured = os.environ.get("MANUAL_SELECTION_MEMORY_PATH", "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve()
-    return DEFAULT_MANUAL_SELECTION_MEMORY_PATH
+    return _learning_db_path()
 
 
 def _path_fingerprint(path: Path) -> str:
@@ -362,6 +394,285 @@ def _ensure_request_caches() -> str:
             cache["scope"] = scope
             cache["entries"] = {}
     return scope
+
+
+def _invalidate_learning_caches() -> None:
+    _matcher_cache["fingerprint"] = None
+    _matcher_cache["master_matcher"] = None
+    _pipeline_result_cache["scope"] = None
+    _pipeline_result_cache["entries"] = {}
+    _manual_search_cache["scope"] = None
+    _manual_search_cache["entries"] = {}
+
+
+def _snapshot_id(job_id: str, row: dict[str, Any]) -> str:
+    return f"{job_id}:{row.get('id')}"
+
+
+def _feedback_candidate_key(candidate: dict[str, Any]) -> str:
+    return str(candidate.get("code_1c") or "").strip().upper()
+
+
+def _normalize_feedback_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(candidate, dict):
+        return None
+    code = str(candidate.get("code_1c") or "").strip()
+    name = str(candidate.get("name") or "").strip()
+    if not code or not name:
+        return None
+    payload = {
+        "code_1c": code,
+        "name": name,
+        "source_label": str(candidate.get("source_label") or "").strip(),
+        "score": float(candidate.get("score") or 0.0),
+        "price": candidate.get("price") or "",
+        "remaining": candidate.get("remaining"),
+        "stock_qty": candidate.get("stock_qty"),
+        "reasons": list(candidate.get("reasons") or []),
+    }
+    if candidate.get("manager_choice"):
+        payload["manager_choice"] = True
+    return payload
+
+
+def _merge_candidate_pool(*candidate_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_code: dict[str, dict[str, Any]] = {}
+    for candidates in candidate_groups:
+        if not isinstance(candidates, list):
+            continue
+        for raw_candidate in candidates:
+            candidate = _normalize_feedback_candidate(raw_candidate)
+            if candidate is None:
+                continue
+            code = _feedback_candidate_key(candidate)
+            if not code:
+                continue
+            current = by_code.get(code)
+            if current is None:
+                by_code[code] = candidate
+                continue
+            if len(candidate.get("reasons") or []) > len(current.get("reasons") or []):
+                current["reasons"] = list(candidate.get("reasons") or [])
+            if not current.get("source_label") and candidate.get("source_label"):
+                current["source_label"] = candidate["source_label"]
+            if not current.get("price") and candidate.get("price"):
+                current["price"] = candidate["price"]
+            if current.get("remaining") is None and candidate.get("remaining") is not None:
+                current["remaining"] = candidate["remaining"]
+            if current.get("stock_qty") is None and candidate.get("stock_qty") is not None:
+                current["stock_qty"] = candidate["stock_qty"]
+            if float(candidate.get("score") or 0.0) > float(current.get("score") or 0.0):
+                current["score"] = candidate["score"]
+            if candidate.get("manager_choice"):
+                current["manager_choice"] = True
+    return list(by_code.values())
+
+
+def _infer_selection_source(row: dict[str, Any], candidate: dict[str, Any]) -> str:
+    selected_via = str(row.get("selected_via") or "").strip()
+    if selected_via:
+        return selected_via
+    approved_code = _feedback_candidate_key(candidate)
+    if any(_feedback_candidate_key(item) == approved_code for item in row.get("analogs", []) if isinstance(item, dict)):
+        return "analog"
+    if row.get("selection_search_query"):
+        return "manual_search"
+    return "analog"
+
+
+def _build_feedback_snapshot_entries(
+    *,
+    job_id: str,
+    row: dict[str, Any],
+    approved_candidate: dict[str, Any],
+    visible_candidates: list[dict[str, Any]],
+    user: AuthUser,
+    selected_via: str,
+    search_query: str,
+    selected_at: str,
+) -> list[dict[str, Any]]:
+    query = str(row.get("raw_query") or row.get("name") or "").strip()
+    query_key = str(row.get("search_text") or build_search_text(query)).strip()
+    key_tokens = list(row.get("key_tokens") or [])
+    root_tokens = list(row.get("root_tokens") or [])
+    dimension_tags = list(row.get("dimension_tags") or [])
+    if not key_tokens or not root_tokens or not dimension_tags:
+        query_tokens = extract_tokens(query_key)
+        if not key_tokens:
+            key_tokens = sorted(extract_key_tokens(query_tokens))
+        if not root_tokens:
+            root_tokens = sorted(extract_root_tokens(query_tokens))
+        if not dimension_tags:
+            derived_tags = (
+                extract_dimension_tags(query)
+                | extract_family_tags(query)
+                | extract_parser_hint_tags(query)
+                | extract_material_tags_from_search_text(query_key)
+            )
+            dimension_tags = sorted(derived_tags)
+    structure_keys = list(
+        build_structural_query_keys(
+            search_text=query_key,
+            key_tokens=key_tokens,
+            dimension_tags=dimension_tags,
+        )
+    )
+    clean_search_query = search_query.strip()
+    snapshot_id = _snapshot_id(job_id, row)
+    normalized_approved = _normalize_feedback_candidate(approved_candidate)
+    if normalized_approved is None:
+        return []
+    approved_code = _feedback_candidate_key(normalized_approved)
+
+    rejected_by_code: dict[str, dict[str, Any]] = {}
+    for candidate in _merge_candidate_pool(visible_candidates):
+        code = _feedback_candidate_key(candidate)
+        if not code or code == approved_code:
+            continue
+        rejected_by_code[code] = candidate
+
+    base_entry = {
+        "snapshot_id": snapshot_id,
+        "job_id": job_id,
+        "row_id": str(row.get("id") or "").strip(),
+        "query": query,
+        "query_key": query_key,
+        "structure_keys": structure_keys,
+        "order_key_tokens": key_tokens,
+        "order_root_tokens": root_tokens,
+        "order_dimension_tags": dimension_tags,
+        "manual_search_query": clean_search_query,
+        "manual_search_query_key": build_search_text(clean_search_query) if clean_search_query else "",
+        "selected_via": selected_via,
+        "initial_status": str(row.get("initial_status") or "").strip(),
+        "selected_by": user.username,
+        "selected_by_display": user.display_name,
+        "selected_at": selected_at,
+        "updated_at": _iso_now(),
+    }
+    entries = [
+        {
+            **base_entry,
+            "record_id": f"{snapshot_id}:approved:{approved_code}",
+            "candidate_code": normalized_approved["code_1c"],
+            "candidate_name": normalized_approved["name"],
+            "candidate_source_label": normalized_approved.get("source_label") or "",
+            "decision": "approved",
+        }
+    ]
+    for code, candidate in rejected_by_code.items():
+        entries.append(
+            {
+                **base_entry,
+                "record_id": f"{snapshot_id}:rejected:{code}",
+                "candidate_code": candidate["code_1c"],
+                "candidate_name": candidate["name"],
+                "candidate_source_label": candidate.get("source_label") or "",
+                "decision": "rejected",
+            }
+        )
+    return entries
+
+
+def _feedback_user_for_row(row: dict[str, Any], data: dict[str, Any] | None = None) -> AuthUser:
+    username = str(row.get("selected_by") or (data or {}).get("saved_by") or (data or {}).get("created_by") or "").strip().lower()
+    display_name = str(row.get("selected_by_display") or (data or {}).get("saved_by_display") or (data or {}).get("created_by_display") or username).strip()
+    role = str((data or {}).get("saved_by_role") or (data or {}).get("created_by_role") or "manager").strip().lower() or "manager"
+    return AuthUser(username=username, display_name=display_name or username, role=role)
+
+
+def _save_feedback_snapshot_for_row(
+    *,
+    job_id: str,
+    row: dict[str, Any],
+    approved_candidate: dict[str, Any],
+    user: AuthUser,
+    visible_candidates: list[dict[str, Any]] | None = None,
+    previous_approved_candidate: dict[str, Any] | None = None,
+    selected_via: str = "",
+    search_query: str = "",
+    selected_at: str = "",
+) -> bool:
+    normalized_approved = _normalize_feedback_candidate(approved_candidate)
+    if normalized_approved is None:
+        return False
+    snapshot_id = _snapshot_id(job_id, row)
+    effective_selected_at = selected_at or str(row.get("selected_at") or _iso_now())
+    entries = _build_feedback_snapshot_entries(
+        job_id=job_id,
+        row=row,
+        approved_candidate=normalized_approved,
+        visible_candidates=_merge_candidate_pool(
+            row.get("analogs", []),
+            visible_candidates or [],
+            [previous_approved_candidate] if isinstance(previous_approved_candidate, dict) else [],
+        ),
+        user=user,
+        selected_via=selected_via or _infer_selection_source(row, normalized_approved),
+        search_query=search_query or str(row.get("selection_search_query") or ""),
+        selected_at=effective_selected_at,
+    )
+    if not entries:
+        return False
+    store = _get_learning_store()
+    saved_count = store.replace_feedback_snapshot(snapshot_id, entries)
+    row["learning_snapshot_id"] = snapshot_id
+    row["learning_snapshot_saved"] = bool(saved_count)
+    row["learning_snapshot_saved_at"] = _iso_now()
+    row["learning_snapshot_entry_count"] = saved_count
+    row["learning_snapshot_rejected_count"] = max(0, saved_count - 1)
+    _invalidate_learning_caches()
+    return bool(saved_count)
+
+
+def _backfill_feedback_from_saved_jobs(store: LearningStore) -> None:
+    if not JOBS_DIR.exists():
+        return
+    existing_snapshot_ids = {str(entry.get("snapshot_id") or "") for entry in store.load_feedback_entries() if entry.get("snapshot_id")}
+    for result_path in JOBS_DIR.glob("*/result.json"):
+        try:
+            data = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        job_id = result_path.parent.name
+        for row in data.get("rows", []):
+            approved = row.get("approved_analog")
+            if not isinstance(approved, dict):
+                continue
+            snapshot_id = _snapshot_id(job_id, row)
+            if snapshot_id in existing_snapshot_ids:
+                continue
+            user = _feedback_user_for_row(row, data)
+            if not user.username:
+                continue
+            entries = _build_feedback_snapshot_entries(
+                job_id=job_id,
+                row=row,
+                approved_candidate=approved,
+                visible_candidates=row.get("analogs", []),
+                user=user,
+                selected_via=_infer_selection_source(row, approved),
+                search_query=str(row.get("selection_search_query") or ""),
+                selected_at=str(row.get("selected_at") or data.get("saved_at") or data.get("created_at") or _iso_now()),
+            )
+            if not entries:
+                continue
+            store.replace_feedback_snapshot(snapshot_id, entries)
+            existing_snapshot_ids.add(snapshot_id)
+
+
+def _get_learning_store() -> LearningStore:
+    global _learning_store
+    if _learning_store is not None:
+        return _learning_store
+    store = LearningStore(_learning_db_path())
+    legacy_manual_path = _legacy_manual_selection_path()
+    manual_payload = _load_manual_selection_payload(legacy_manual_path) if legacy_manual_path.exists() else None
+    export_payload = _load_export_audit_payload()
+    store.migrate_legacy_payloads(manual_payload=manual_payload, export_payload=export_payload)
+    _backfill_feedback_from_saved_jobs(store)
+    _learning_store = store
+    return store
 
 
 def _file_content_hash(path: Path) -> str:
@@ -429,6 +740,7 @@ def _load_cached_matcher() -> "StockMatcher":
     independent remaining-quantity tracking.
     """
     stock_files = _find_all_stock_files()
+    _get_learning_store()
     manual_memory_path = _manual_selection_memory_path()
     fp = f"{_stock_fingerprint(stock_files)}|manual:{_path_fingerprint(manual_memory_path)}"
     if _matcher_cache["fingerprint"] == fp and _matcher_cache["master_matcher"] is not None:
@@ -468,6 +780,10 @@ def _serialize_candidate(analog) -> dict[str, Any]:
         "price": analog.stock.sale_price,
         "reasons": analog.reasons,
     }
+    if getattr(analog, "retrieval_paths", ()):
+        result["retrieval_paths"] = list(analog.retrieval_paths)
+    if getattr(analog, "feature_scores", None):
+        result["feature_scores"] = analog.feature_scores
     if analog.stock.source_label:
         result["source_label"] = analog.stock.source_label
     if getattr(analog, "manual_learning_boost", 0.0) > 0.0:
@@ -786,7 +1102,9 @@ def _build_export_audit_event(
             continue
         selected_via = str(row.get("selected_via") or "")
         initial_status = str(row.get("initial_status") or "")
-        learned = selected_via == "manual_search" and initial_status == STATUS_NOT_FOUND
+        learned = bool(row.get("learning_snapshot_saved")) or (
+            selected_via == "manual_search" and initial_status == STATUS_NOT_FOUND
+        )
         if selected_via == "manual_search":
             manual_search_replacements += 1
         if learned:
@@ -812,6 +1130,7 @@ def _build_export_audit_event(
                 "candidate_score": approved.get("score"),
                 "manager_choice": bool(approved.get("manager_choice")),
                 "reasons": list(approved.get("reasons") or []),
+                "learning_snapshot_id": row.get("learning_snapshot_id") or "",
                 "learned_on_export": learned,
             }
         )
@@ -834,34 +1153,46 @@ def _build_export_audit_event(
 
 
 def _append_export_audit_event(job_id: str, data: dict[str, Any], user: AuthUser, learning_saved_count: int) -> dict[str, Any]:
-    payload = _load_export_audit_payload()
     event = _build_export_audit_event(
         job_id=job_id,
         data=data,
         user=user,
         learning_saved_count=learning_saved_count,
     )
-    payload["exports"] = [entry for entry in payload.get("exports", []) if entry.get("export_event_id") != event["export_event_id"]]
-    payload["exports"].append(event)
-    payload["event_count"] = len(payload["exports"])
-    payload["updated_at"] = _iso_now()
-    _save_export_audit_payload(payload)
+    _get_learning_store().replace_export_event(event)
     return event
 
 
-def _build_admin_analytics(payload: dict[str, Any], users: dict[str, dict[str, str]]) -> dict[str, Any]:
+def _build_admin_analytics(
+    payload: dict[str, Any],
+    users: dict[str, dict[str, str]],
+    feedback_entries: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     exports = sorted(
         [entry for entry in payload.get("exports", []) if isinstance(entry, dict)],
         key=lambda item: str(item.get("saved_at") or ""),
         reverse=True,
     )
+    feedback_entries = [entry for entry in (feedback_entries or []) if isinstance(entry, dict)]
+    approved_snapshots: dict[str, dict[str, Any]] = {}
+    for entry in feedback_entries:
+        if str(entry.get("decision") or "").strip().lower() != "approved":
+            continue
+        snapshot_id = str(entry.get("snapshot_id") or entry.get("record_id") or "").strip()
+        if not snapshot_id or snapshot_id in approved_snapshots:
+            continue
+        approved_snapshots[snapshot_id] = entry
     summary = {
         "saved_files": len(exports),
         "unique_jobs": len({entry.get("job_id") for entry in exports if entry.get("job_id")}),
         "total_rows": sum(int(entry.get("total_rows", 0) or 0) for entry in exports),
         "replacement_count": sum(int(entry.get("replacement_count", 0) or 0) for entry in exports),
         "manual_search_replacement_count": sum(int(entry.get("manual_search_replacement_count", 0) or 0) for entry in exports),
-        "learned_replacement_count": sum(int(entry.get("learned_replacement_count", 0) or 0) for entry in exports),
+        "learned_replacement_count": (
+            len(approved_snapshots)
+            if approved_snapshots
+            else sum(int(entry.get("learned_replacement_count", 0) or 0) for entry in exports)
+        ),
         "users_with_exports": len({entry.get("saved_by") for entry in exports if entry.get("saved_by")}),
     }
 
@@ -908,7 +1239,6 @@ def _build_admin_analytics(payload: dict[str, Any], users: dict[str, dict[str, s
         stat["total_rows"] += int(entry.get("total_rows", 0) or 0)
         stat["replacement_count"] += int(entry.get("replacement_count", 0) or 0)
         stat["manual_search_replacement_count"] += int(entry.get("manual_search_replacement_count", 0) or 0)
-        stat["learned_replacement_count"] += int(entry.get("learned_replacement_count", 0) or 0)
         stat["last_saved_at"] = max(stat["last_saved_at"], str(entry.get("saved_at") or ""))
         job_id = str(entry.get("job_id") or "")
         if job_id:
@@ -943,10 +1273,77 @@ def _build_admin_analytics(payload: dict[str, Any], users: dict[str, dict[str, s
                 },
             )
             item["times_used"] += 1
-            if replacement.get("learned_on_export"):
-                item["times_learned"] += 1
             item["last_used_at"] = max(item["last_used_at"], str(entry.get("saved_at") or ""))
             item["used_by"].add(username)
+
+    for entry in approved_snapshots.values():
+        username = str(entry.get("selected_by") or "").strip().lower()
+        if not username:
+            continue
+        stat = user_stats.setdefault(
+            username,
+            {
+                "username": username,
+                "display_name": entry.get("selected_by_display") or username,
+                "role": "manager",
+                "saved_files": 0,
+                "unique_jobs": 0,
+                "total_rows": 0,
+                "replacement_count": 0,
+                "manual_search_replacement_count": 0,
+                "learned_replacement_count": 0,
+                "last_saved_at": "",
+                "files": [],
+                "_job_ids": set(),
+            },
+        )
+        stat["learned_replacement_count"] += 1
+        code = str(entry.get("candidate_code") or "").strip()
+        name = str(entry.get("candidate_name") or "").strip()
+        if not code or not name:
+            continue
+        item = replacement_popularity.setdefault(
+            code,
+            {
+                "candidate_code": code,
+                "candidate_name": name,
+                "times_used": 0,
+                "times_learned": 0,
+                "last_used_at": "",
+                "used_by": set(),
+            },
+        )
+        item["times_learned"] += 1
+        item["last_used_at"] = max(item["last_used_at"], str(entry.get("selected_at") or ""))
+        item["used_by"].add(username)
+
+    if not approved_snapshots:
+        for entry in exports:
+            username = str(entry.get("saved_by") or "").strip().lower()
+            if username and username in user_stats:
+                user_stats[username]["learned_replacement_count"] += int(entry.get("learned_replacement_count", 0) or 0)
+            for replacement in entry.get("replacements", []):
+                if not isinstance(replacement, dict) or not replacement.get("learned_on_export"):
+                    continue
+                code = str(replacement.get("candidate_code") or "").strip()
+                name = str(replacement.get("candidate_name") or "").strip()
+                if not code or not name:
+                    continue
+                item = replacement_popularity.setdefault(
+                    code,
+                    {
+                        "candidate_code": code,
+                        "candidate_name": name,
+                        "times_used": 0,
+                        "times_learned": 0,
+                        "last_used_at": "",
+                        "used_by": set(),
+                    },
+                )
+                item["times_learned"] += 1
+                item["last_used_at"] = max(item["last_used_at"], str(entry.get("saved_at") or ""))
+                if username:
+                    item["used_by"].add(username)
 
     prepared_users: list[dict[str, Any]] = []
     for stat in user_stats.values():
@@ -1025,64 +1422,21 @@ def _record_manual_selection_learning(
     candidate: dict[str, Any],
     search_query: str,
 ) -> bool:
-    if row.get("initial_status") != STATUS_NOT_FOUND:
-        return False
-
-    path = _manual_selection_memory_path()
-    payload = _load_manual_selection_payload(path)
-    entries = [entry for entry in payload.get("entries", []) if entry.get("record_id") != f"{job_id}:{row['id']}"]
-
-    query = str(row.get("raw_query") or row.get("name") or "").strip()
-    query_key = str(row.get("search_text") or build_search_text(query)).strip()
-    key_tokens = list(row.get("key_tokens") or [])
-    root_tokens = list(row.get("root_tokens") or [])
-    dimension_tags = list(row.get("dimension_tags") or [])
-    if not key_tokens or not root_tokens or not dimension_tags:
-        query_tokens = extract_tokens(query_key)
-        if not key_tokens:
-            key_tokens = sorted(extract_key_tokens(query_tokens))
-        if not root_tokens:
-            root_tokens = sorted(extract_root_tokens(query_tokens))
-        if not dimension_tags:
-            derived_tags = (
-                extract_dimension_tags(query)
-                | extract_family_tags(query)
-                | extract_parser_hint_tags(query)
-                | extract_material_tags_from_search_text(query_key)
-            )
-            dimension_tags = sorted(derived_tags)
-
-    clean_search_query = search_query.strip()
-    entries.append(
-        {
-            "record_id": f"{job_id}:{row['id']}",
-            "job_id": job_id,
-            "row_id": row["id"],
-            "selected_at": row.get("selected_at") or _iso_now(),
-            "query": query,
-            "query_key": query_key,
-            "order_key_tokens": key_tokens,
-            "order_root_tokens": root_tokens,
-            "order_dimension_tags": dimension_tags,
-            "manual_search_query": clean_search_query,
-            "manual_search_query_key": build_search_text(clean_search_query) if clean_search_query else "",
-            "candidate_code": str(candidate.get("code_1c") or "").strip(),
-            "candidate_name": str(candidate.get("name") or "").strip(),
-            "candidate_source_label": str(candidate.get("source_label") or "").strip(),
-            "selected_via": "manual_search",
-            "selected_by": str(row.get("selected_by") or "").strip(),
-            "selected_by_display": str(row.get("selected_by_display") or "").strip(),
-        }
+    user = AuthUser(
+        username=str(row.get("selected_by") or "").strip().lower(),
+        display_name=str(row.get("selected_by_display") or "").strip(),
+        role="manager",
     )
-
-    payload["entries"] = entries
-    payload["entry_count"] = len(entries)
-    payload["updated_at"] = _iso_now()
-    _save_manual_selection_payload(path, payload)
-
-    _matcher_cache["fingerprint"] = None
-    _matcher_cache["master_matcher"] = None
-    return True
+    if not user.username:
+        return False
+    return _save_feedback_snapshot_for_row(
+        job_id=job_id,
+        row=row,
+        approved_candidate=candidate,
+        user=user,
+        selected_via="manual_search",
+        search_query=search_query,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1173,6 +1527,7 @@ def get_job(job_id: str, authorization: str | None = Header(None)):
 
 class ApproveRequest(BaseModel):
     approvals: dict[str, str]  # row_id -> approved analog code_1c
+    candidate_pools: dict[str, list[dict[str, Any]]] = {}
 
 
 @app.post("/api/jobs/{job_id}/approve")
@@ -1185,6 +1540,7 @@ def approve_analogs(job_id: str, body: ApproveRequest, authorization: str | None
     for row in data["rows"]:
         if row["id"] in body.approvals:
             code = body.approvals[row["id"]]
+            previous_approved = copy.deepcopy(row.get("approved_analog")) if isinstance(row.get("approved_analog"), dict) else None
             # Find the analog with this code
             for analog in row["analogs"]:
                 if analog["code_1c"] == code:
@@ -1195,6 +1551,17 @@ def approve_analogs(job_id: str, body: ApproveRequest, authorization: str | None
                     row["selected_by"] = user.username
                     row["selected_by_display"] = user.display_name
                     row["selected_at"] = _iso_now()
+                    _save_feedback_snapshot_for_row(
+                        job_id=job_id,
+                        row=row,
+                        approved_candidate=analog,
+                        user=user,
+                        visible_candidates=body.candidate_pools.get(row["id"], []),
+                        previous_approved_candidate=previous_approved,
+                        selected_via="analog",
+                        search_query="",
+                        selected_at=str(row["selected_at"]),
+                    )
                     approved_count += 1
                     break
 
@@ -1251,6 +1618,7 @@ class ManualSelectRequest(BaseModel):
     row_id: str
     candidate: dict[str, Any]
     search_query: str = ""
+    visible_candidates: list[dict[str, Any]] = []
 
 
 @app.post("/api/jobs/{job_id}/select")
@@ -1278,6 +1646,7 @@ def select_manual_candidate(job_id: str, body: ManualSelectRequest, authorizatio
         approved["source_label"] = candidate["source_label"]
     if candidate.get("manager_choice"):
         approved["manager_choice"] = True
+    previous_approved = copy.deepcopy(row.get("approved_analog")) if isinstance(row.get("approved_analog"), dict) else None
     row["approved_analog"] = approved
     row["status"] = "Одобрена замена"
     row["selected_via"] = "manual_search"
@@ -1290,6 +1659,18 @@ def select_manual_candidate(job_id: str, body: ManualSelectRequest, authorizatio
     if approved["code_1c"] not in analog_codes:
         row.setdefault("analogs", [])
         row["analogs"].insert(0, approved)
+
+    _save_feedback_snapshot_for_row(
+        job_id=job_id,
+        row=row,
+        approved_candidate=approved,
+        user=user,
+        visible_candidates=body.visible_candidates,
+        previous_approved_candidate=previous_approved,
+        selected_via="manual_search",
+        search_query=body.search_query,
+        selected_at=str(row["selected_at"]),
+    )
 
     status_counts = _rebuild_status_counts(data["rows"])
     data["status_counts"] = status_counts
@@ -1369,15 +1750,15 @@ def export_1c_file(job_id: str, authorization: str | None = Header(None)):
 
     learning_saved_count = 0
     for row in data["rows"]:
-        if row.get("selected_via") != "manual_search":
-            continue
         approved_analog = row.get("approved_analog")
         if not isinstance(approved_analog, dict):
             continue
-        if _record_manual_selection_learning(
+        if _save_feedback_snapshot_for_row(
             job_id=job_id,
             row=row,
-            candidate=approved_analog,
+            approved_candidate=approved_analog,
+            user=user,
+            selected_via=str(row.get("selected_via") or ""),
             search_query=str(row.get("selection_search_query") or ""),
         ):
             learning_saved_count += 1
@@ -1401,9 +1782,12 @@ def export_1c_file(job_id: str, authorization: str | None = Header(None)):
 def admin_analytics(authorization: str | None = Header(None)):
     user = _check_auth(authorization)
     _require_admin(user)
-    payload = _load_export_audit_payload()
+    store = _get_learning_store()
+    payload = {
+        "exports": store.load_export_events(),
+    }
     users = _load_user_directory()
-    analytics = _build_admin_analytics(payload, users)
+    analytics = _build_admin_analytics(payload, users, store.load_feedback_entries())
     analytics["generated_at"] = _iso_now()
     return analytics
 

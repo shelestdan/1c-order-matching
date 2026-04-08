@@ -24,6 +24,7 @@ import hashlib
 import json
 import math
 import re
+import sqlite3
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
@@ -40,7 +41,8 @@ from nomenclature_classifier import ClassificationStatus, QueryClassification, l
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH = PROJECT_ROOT / "data" / "reviewed_analog_decisions.json"
-DEFAULT_MANUAL_SELECTION_MEMORY_PATH = PROJECT_ROOT / "data" / "manual_selection_memory.json"
+LEGACY_MANUAL_SELECTION_MEMORY_PATH = PROJECT_ROOT / "data" / "manual_selection_memory.json"
+DEFAULT_MANUAL_SELECTION_MEMORY_PATH = PROJECT_ROOT / "data" / "learning_store.db"
 CLASSIFIER_CONFIG_PATH = PROJECT_ROOT / "data" / "nomenclature_classifier_config.json"
 DOMAIN_DICTIONARY_PATH = PROJECT_ROOT / "data" / "vgs2000_matching_dictionary.json"
 SUBSTITUTION_POLICY_PATH = PROJECT_ROOT / "data" / "substitution_policy.json"
@@ -494,8 +496,35 @@ FAMILY_ANALOG_REASONS = {
     "zadvizhka": "совпали семейство и DN, нужна ручная проверка исполнения",
 }
 
+FAMILY_RANKING_PROFILES: dict[str, dict[str, dict[str, float]]] = {
+    "flange": {
+        "match": {"dn": 8.0, "pn": 8.0, "type": 10.0, "spec": 8.0, "grade": 6.0, "face": 4.0, "exec": 4.0, "hole": 2.0},
+        "conflict": {"dn": 16.0, "pn": 14.0, "type": 18.0, "spec": 10.0, "grade": 10.0, "face": 8.0, "exec": 8.0, "hole": 6.0},
+    },
+    "tee": {
+        "match": {"tripledn": 18.0, "dn": 6.0, "mclass": 6.0, "grade": 4.0},
+        "conflict": {"tripledn": 24.0, "dn": 12.0, "mclass": 10.0, "grade": 8.0},
+    },
+    "perehod": {
+        "match": {"pairdn": 18.0, "dn": 6.0, "mclass": 6.0, "grade": 4.0, "conn_gender": 6.0, "subtype": 6.0},
+        "conflict": {"pairdn": 24.0, "dn": 12.0, "mclass": 10.0, "grade": 8.0, "conn_gender": 10.0, "subtype": 10.0},
+        "extra_penalty": {"conn_gender": 6.0, "subtype": 6.0},
+    },
+    "pipe": {
+        "match": {"od": 12.0, "wall": 12.0, "spec": 10.0, "mclass": 8.0, "grade": 6.0},
+        "conflict": {"od": 18.0, "wall": 18.0, "spec": 12.0, "mclass": 12.0, "grade": 10.0},
+    },
+}
+
 FAMILY_SPECIFIC_SUBTYPE_VALUES: dict[str, set[str]] = {
     "elbow": {"offset"},
+}
+
+IGNORED_ORDER_SHEET_NAMES = {
+    "сводка",
+    "проблемы",
+    "summary",
+    "issues",
 }
 
 DOMAIN_DICTIONARY_PATH = Path(__file__).resolve().parent.parent / "data" / "vgs2000_matching_dictionary.json"
@@ -703,6 +732,8 @@ class Candidate:
     review_decision: str = ""
     manual_learning_boost: float = 0.0
     manual_learning_allowed: bool = False
+    retrieval_paths: tuple[str, ...] = ()
+    feature_scores: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -714,8 +745,11 @@ class ManualSelectionEntry:
     order_key_tokens: tuple[str, ...] = ()
     order_root_tokens: tuple[str, ...] = ()
     order_dimension_tags: tuple[str, ...] = ()
+    structure_keys: tuple[str, ...] = ()
     manual_search_query: str = ""
     manual_search_query_key: str = ""
+    decision: str = REVIEW_DECISION_APPROVED
+    selected_via: str = ""
 
 
 @dataclass(frozen=True)
@@ -777,6 +811,110 @@ def build_review_query_keys(*parts: object) -> tuple[str, ...]:
     return tuple(keys)
 
 
+MEMORY_STRUCTURED_PRIORITY = (
+    "tripledn",
+    "pairdn",
+    "dn",
+    "od",
+    "inch",
+    "wall",
+    "pn",
+    "mclass",
+    "grade",
+    "connection",
+    "conn_gender",
+    "subtype",
+    "shape",
+    "type",
+    "exec",
+    "face",
+    "hole",
+    "spec",
+    "deg",
+    "series",
+    "kvs",
+    "lmm",
+)
+MEMORY_GENERIC_KEY_TOKENS = {
+    *COMMON_TOKENS,
+    "gost",
+    "truba",
+    "detal",
+    "material",
+    "izdelie",
+    "zakazchika",
+    "kakoi",
+    "kakaya",
+    "kakoe",
+    "kakoi-to",
+}
+
+
+def build_structural_query_keys(
+    *,
+    search_text: str = "",
+    key_tokens: Iterable[str] = (),
+    dimension_tags: Iterable[str] = (),
+) -> tuple[str, ...]:
+    tags = set(dimension_tags)
+    grouped = expand_dimension_values(group_dimension_tags(tags))
+    families = sorted(extract_tag_values(tags, "family:") & PRIMARY_FAMILY_TAGS)
+    if not families:
+        families = sorted(extract_tag_values(tags, "family:"))
+
+    def pack(parts: Sequence[str]) -> str:
+        return "|".join(part for part in parts if part)
+
+    def encode_values(key: str) -> str:
+        values = sorted(grouped.get(key, set()))
+        if not values:
+            return ""
+        return f"{key}=" + ",".join(values)
+
+    informative_tokens = [
+        token
+        for token in sorted(set(key_tokens))
+        if len(token) >= 4 and not token.isdigit() and token not in MEMORY_GENERIC_KEY_TOKENS
+    ]
+
+    family_part = f"family={','.join(families)}" if families else ""
+    core_parts = [family_part] + [encode_values(key) for key in ("tripledn", "pairdn", "dn", "od", "inch", "wall", "pn", "mclass", "grade")]
+    expanded_parts = [family_part] + [encode_values(key) for key in MEMORY_STRUCTURED_PRIORITY]
+    token_part = f"tokens={','.join(informative_tokens[:3])}" if informative_tokens else ""
+
+    keys: list[str] = []
+    for candidate in (
+        pack(expanded_parts),
+        pack(core_parts),
+        pack([family_part, encode_values("tripledn"), encode_values("pairdn"), encode_values("dn"), encode_values("od"), encode_values("inch")]),
+        pack([family_part, encode_values("dn"), encode_values("pn"), encode_values("mclass"), encode_values("grade")]),
+        pack([family_part, token_part]),
+        token_part,
+        build_search_text(search_text),
+    ):
+        normalized = clean_text(candidate)
+        if normalized and normalized not in keys:
+            keys.append(normalized)
+    return tuple(keys)
+
+
+def build_retrieval_structure_keys(
+    *,
+    search_text: str = "",
+    key_tokens: Iterable[str] = (),
+    dimension_tags: Iterable[str] = (),
+) -> tuple[str, ...]:
+    return tuple(
+        key
+        for key in build_structural_query_keys(
+            search_text=search_text,
+            key_tokens=key_tokens,
+            dimension_tags=dimension_tags,
+        )
+        if "=" in key
+    )
+
+
 def _dedupe_text_values(values: object) -> tuple[str, ...]:
     if not isinstance(values, (list, tuple, set)):
         return ()
@@ -791,13 +929,41 @@ def _dedupe_text_values(values: object) -> tuple[str, ...]:
 def load_manual_selection_memory(path: Path | None) -> tuple[ManualSelectionEntry, ...]:
     if path is None or not path.exists():
         return ()
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    raw_entries = payload.get("entries", [])
-    if not isinstance(raw_entries, list):
-        return ()
+    if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+        try:
+            with sqlite3.connect(path) as conn:
+                conn.row_factory = sqlite3.Row
+                raw_entries = conn.execute(
+                    """
+                    SELECT
+                        record_id,
+                        query,
+                        query_key,
+                        order_key_tokens_json,
+                        order_root_tokens_json,
+                        order_dimension_tags_json,
+                        structure_keys_json,
+                        manual_search_query,
+                        manual_search_query_key,
+                        candidate_code,
+                        decision,
+                        selected_via
+                    FROM feedback_entries
+                    ORDER BY updated_at DESC, record_id DESC
+                    """
+                ).fetchall()
+        except sqlite3.Error:
+            return ()
+    else:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw_entries = payload.get("entries", [])
+        if not isinstance(raw_entries, list):
+            return ()
 
     entries: list[ManualSelectionEntry] = []
     for raw in raw_entries:
+        if isinstance(raw, sqlite3.Row):
+            raw = dict(raw)
         if not isinstance(raw, Mapping):
             continue
         query = clean_text(raw.get("query"))
@@ -809,6 +975,10 @@ def load_manual_selection_memory(path: Path | None) -> tuple[ManualSelectionEntr
         order_key_tokens = _dedupe_text_values(raw.get("order_key_tokens"))
         order_root_tokens = _dedupe_text_values(raw.get("order_root_tokens"))
         order_dimension_tags = _dedupe_text_values(raw.get("order_dimension_tags"))
+        if "order_key_tokens_json" in raw:
+            order_key_tokens = _dedupe_text_values(json.loads(str(raw.get("order_key_tokens_json") or "[]")))
+            order_root_tokens = _dedupe_text_values(json.loads(str(raw.get("order_root_tokens_json") or "[]")))
+            order_dimension_tags = _dedupe_text_values(json.loads(str(raw.get("order_dimension_tags_json") or "[]")))
         if not order_key_tokens or not order_root_tokens or not order_dimension_tags:
             parsed_query = query or query_key
             search_text = query_key or build_search_text(parsed_query)
@@ -829,6 +999,18 @@ def load_manual_selection_memory(path: Path | None) -> tuple[ManualSelectionEntr
         manual_search_query = clean_text(raw.get("manual_search_query") or raw.get("search_query"))
         manual_search_query_key = clean_text(raw.get("manual_search_query_key")) or build_search_text(manual_search_query)
         record_id = clean_text(raw.get("record_id")) or f"{candidate_code}:{query_key}"
+        if "structure_keys_json" in raw:
+            structure_keys = _dedupe_text_values(json.loads(str(raw.get("structure_keys_json") or "[]")))
+        else:
+            structure_keys = _dedupe_text_values(raw.get("structure_keys"))
+        if not structure_keys:
+            structure_keys = build_structural_query_keys(
+                search_text=query_key,
+                key_tokens=order_key_tokens,
+                dimension_tags=order_dimension_tags,
+            )
+        decision = clean_text(raw.get("decision")).lower() or REVIEW_DECISION_APPROVED
+        selected_via = clean_text(raw.get("selected_via"))
 
         entries.append(
             ManualSelectionEntry(
@@ -839,12 +1021,24 @@ def load_manual_selection_memory(path: Path | None) -> tuple[ManualSelectionEntr
                 order_key_tokens=order_key_tokens,
                 order_root_tokens=order_root_tokens,
                 order_dimension_tags=order_dimension_tags,
+                structure_keys=structure_keys,
                 manual_search_query=manual_search_query,
                 manual_search_query_key=manual_search_query_key,
+                decision=decision,
+                selected_via=selected_via,
             )
         )
 
     return tuple(entries)
+
+
+def load_default_manual_selection_memory() -> tuple[ManualSelectionEntry, ...]:
+    preferred_paths = [DEFAULT_MANUAL_SELECTION_MEMORY_PATH, LEGACY_MANUAL_SELECTION_MEMORY_PATH]
+    for path in preferred_paths:
+        loaded = load_manual_selection_memory(path)
+        if loaded:
+            return loaded
+    return ()
 
 
 def load_reviewed_analog_decisions(path: Path | None) -> dict[str, dict[str, str]]:
@@ -2268,6 +2462,105 @@ def safe_overlap(left: set[str], right: set[str]) -> float:
     return len(left & right) / len(left)
 
 
+def _tag_value_set(grouped_dimensions: dict[str, set[str]], tags: Iterable[str], key: str) -> set[str]:
+    if key == "family":
+        family = primary_family_tag(tags)
+        return {family} if family else set()
+    if key in grouped_dimensions:
+        return set(grouped_dimensions.get(key, set()))
+    return extract_tag_values(tags, f"{key}:")
+
+
+def _dimension_union(grouped_dimensions: dict[str, set[str]], *keys: str) -> set[str]:
+    values: set[str] = set()
+    for key in keys:
+        values |= grouped_dimensions.get(key, set())
+    return values
+
+
+def _family_partial_dimension_bonus(
+    family: str,
+    order_dimensions: dict[str, set[str]],
+    stock_dimensions: dict[str, set[str]],
+) -> tuple[float, list[str], dict[str, float]]:
+    order_dns = _dimension_union(order_dimensions, "dn", "od")
+    stock_dns = _dimension_union(stock_dimensions, "dn", "od")
+    shared_dns = order_dns & stock_dns
+    if not shared_dns:
+        return 0.0, [], {}
+
+    reasons: list[str] = []
+    conflict_scale: dict[str, float] = {}
+
+    if family == "perehod":
+        stock_has_pair = bool(stock_dimensions.get("pairdn"))
+        if stock_has_pair:
+            reasons.append("family-profile: частично совпадает сторона перехода")
+            conflict_scale["pairdn"] = 0.25
+            return (12.0 if len(shared_dns) >= 2 else 10.0), reasons, conflict_scale
+        if len(stock_dns) == 1:
+            reasons.append("family-profile: совпадает одна сторона перехода")
+            return 6.0, reasons, conflict_scale
+
+    if family == "tee" and order_dimensions.get("tripledn"):
+        stock_has_pair = bool(stock_dimensions.get("pairdn"))
+        if stock_has_pair:
+            reasons.append("family-profile: частично совпадает переходной тройник")
+            return (14.0 if len(shared_dns) >= 2 else 12.0), reasons, conflict_scale
+        if len(stock_dns) == 1:
+            reasons.append("family-profile: совпадает основной размер тройника")
+            return 6.0, reasons, conflict_scale
+
+    return 0.0, [], {}
+
+
+def family_ranking_profile_bonus(order: OrderLine, stock: StockItem) -> tuple[float, list[str]]:
+    family = primary_family_tag(order.dimension_tags)
+    profile = FAMILY_RANKING_PROFILES.get(family)
+    if not profile:
+        return 0.0, []
+
+    order_dimensions = expand_dimension_values(group_dimension_tags(order.dimension_tags))
+    stock_dimensions = expand_dimension_values(group_dimension_tags(stock.dimension_tags))
+    bonus = 0.0
+    reasons: list[str] = []
+    partial_bonus, partial_reasons, conflict_scale = _family_partial_dimension_bonus(
+        family,
+        order_dimensions,
+        stock_dimensions,
+    )
+
+    for key, weight in profile.get("match", {}).items():
+        order_values = _tag_value_set(order_dimensions, order.dimension_tags, key)
+        stock_values = _tag_value_set(stock_dimensions, stock.dimension_tags, key)
+        if not order_values or not stock_values:
+            continue
+        if order_values & stock_values:
+            bonus += float(weight)
+            reasons.append(f"family-profile: совпадает {key}")
+
+    for key, weight in profile.get("conflict", {}).items():
+        order_values = _tag_value_set(order_dimensions, order.dimension_tags, key)
+        stock_values = _tag_value_set(stock_dimensions, stock.dimension_tags, key)
+        if not order_values or not stock_values:
+            continue
+        if not (order_values & stock_values):
+            bonus -= float(weight) * float(conflict_scale.get(key, 1.0))
+            reasons.append(f"family-profile: конфликт {key}")
+
+    for key, weight in profile.get("extra_penalty", {}).items():
+        order_values = _tag_value_set(order_dimensions, order.dimension_tags, key)
+        stock_values = _tag_value_set(stock_dimensions, stock.dimension_tags, key)
+        if order_values or not stock_values:
+            continue
+        bonus -= float(weight)
+        reasons.append(f"family-profile: лишний {key}")
+
+    bonus += partial_bonus
+    reasons.extend(partial_reasons)
+    return bonus, reasons
+
+
 def token_set_ratio(left: Sequence[str], right: Sequence[str]) -> float:
     if not left or not right:
         return 0.0
@@ -2576,6 +2869,96 @@ def score_header_row(values: Sequence[object]) -> tuple[int, dict[str, int]]:
     return score, mapping
 
 
+def merge_header_rows(rows: Sequence[Sequence[object]], start_index: int, span: int = 1) -> list[str]:
+    chunk = rows[start_index : start_index + span]
+    max_columns = max((len(row) for row in chunk), default=0)
+    merged: list[str] = []
+    for column_index in range(max_columns):
+        parts: list[str] = []
+        for row in chunk:
+            if column_index >= len(row):
+                continue
+            value = clean_text(row[column_index])
+            if value and value not in parts:
+                parts.append(value)
+        merged.append(" ".join(parts).strip())
+    return merged
+
+
+def _score_header_candidate(
+    rows: Sequence[Sequence[object]],
+    start_index: int,
+    span: int,
+) -> tuple[float, dict[str, int], list[str], int]:
+    merged_headers = merge_header_rows(rows, start_index, span)
+    score, mapping = score_header_row(merged_headers)
+    if score <= 0:
+        return float(score), mapping, merged_headers, start_index + span - 1
+
+    header_end_index = start_index + span - 1
+    mapping = infer_column_defaults(rows, mapping, header_end_index)
+    score_value = float(score)
+
+    if "name" in mapping:
+        score_value += 8.0
+    if "qty" in mapping:
+        score_value += 8.0
+    if "position" in mapping:
+        score_value += 2.0
+    if "unit" in mapping:
+        score_value += 2.0
+    if "name" in mapping and "qty" in mapping:
+        score_value += 6.0
+
+    sample_rows = [
+        list(row)
+        for row in rows[header_end_index + 1 : header_end_index + 13]
+        if any(clean_text(value) for value in row)
+    ]
+    plausible_rows = 0
+    qty_hits = 0
+    name_hits = 0
+    for row in sample_rows:
+        name = strip_parser_body_noise(get_mapped_text(row, mapping.get("name", 0)))
+        qty = get_mapped_quantity(row, mapping.get("qty", 0))
+        unit = normalize_symbols(get_mapped_text(row, mapping.get("unit", 0))).lower()
+        if name and len(name) >= 3:
+            name_hits += 1
+        if qty > 0:
+            qty_hits += 1
+        if name and len(name) >= 3 and qty > 0:
+            plausible_rows += 1
+        elif unit and UNIT_CELL_RE.fullmatch(unit):
+            score_value += 0.25
+
+    score_value += plausible_rows * 3.0
+    score_value += name_hits * 0.6
+    score_value += qty_hits * 0.8
+    if plausible_rows == 0 and sample_rows:
+        score_value -= 6.0
+    return score_value, mapping, merged_headers, header_end_index
+
+
+def detect_header_rows(rows: Sequence[Sequence[object]], max_scan_rows: int = 30) -> tuple[int, dict[str, int], list[str]]:
+    best_row = 0
+    best_mapping: dict[str, int] = {}
+    best_score = float("-inf")
+    best_headers: list[str] = []
+    upper_bound = min(len(rows), max_scan_rows)
+    for row_index in range(upper_bound):
+        for span in (1, 2):
+            if row_index + span > len(rows):
+                continue
+            score, mapping, headers, header_end = _score_header_candidate(rows, row_index, span)
+            if score > best_score:
+                best_score = score
+                best_row = header_end
+                best_mapping = mapping
+                best_headers = headers
+    best_mapping = infer_column_defaults(rows, best_mapping, best_row)
+    return best_row, best_mapping, best_headers
+
+
 def infer_column_defaults(
     rows: Sequence[Sequence[object]],
     detected_mapping: dict[str, int],
@@ -2715,24 +3098,12 @@ def infer_column_defaults(
 
 
 def detect_header(ws) -> tuple[int, dict[str, int], list[str]]:
-    best_row = 1
-    best_mapping: dict[str, int] = {}
-    best_score = -1
-    best_headers: list[str] = []
-    for row_index in range(1, min(ws.max_row, 30) + 1):
-        values = [ws.cell(row=row_index, column=col).value for col in range(1, ws.max_column + 1)]
-        score, mapping = score_header_row(values)
-        if score > best_score:
-            best_score = score
-            best_row = row_index
-            best_mapping = mapping
-            best_headers = [clean_text(value) for value in values]
     rows = [
         [ws.cell(row=row_index, column=col).value for col in range(1, ws.max_column + 1)]
         for row_index in range(1, min(ws.max_row, 50) + 1)
     ]
-    best_mapping = infer_column_defaults(rows, best_mapping, best_row - 1)
-    return best_row, best_mapping, best_headers
+    best_row, best_mapping, best_headers = detect_header_rows(rows)
+    return best_row + 1, best_mapping, best_headers
 
 
 def row_has_content(values: Sequence[object]) -> bool:
@@ -2743,6 +3114,8 @@ def load_order_lines(order_path: Path) -> list[OrderLine]:
     wb = load_workbook(order_path, data_only=True)
     all_lines: list[OrderLine] = []
     for sheet_name in wb.sheetnames:
+        if sheet_name.strip().lower() in IGNORED_ORDER_SHEET_NAMES:
+            continue
         ws = wb[sheet_name]
         header_row, columns, headers = detect_header(ws)
         for row_index in range(header_row + 1, ws.max_row + 1):
@@ -2816,6 +3189,21 @@ class StockMatcher:
             for query_key, decisions in (reviewed_analog_decisions or {}).items()
         }
         self.manual_selection_memory = tuple(manual_selection_memory or ())
+        self.manual_selection_positive_memory = tuple(
+            entry for entry in self.manual_selection_memory if entry.decision != REVIEW_DECISION_REJECTED
+        )
+        self.manual_feedback_decisions: dict[str, dict[str, str]] = defaultdict(dict)
+        for entry in self.manual_selection_memory:
+            normalized_code = normalize_candidate_code(entry.candidate_code)
+            if not normalized_code:
+                continue
+            for key in dict.fromkeys([entry.query_key, *entry.structure_keys]):
+                if not key:
+                    continue
+                existing = self.manual_feedback_decisions[key].get(normalized_code)
+                if existing == REVIEW_DECISION_REJECTED:
+                    continue
+                self.manual_feedback_decisions[key][normalized_code] = entry.decision or REVIEW_DECISION_APPROVED
         self.substitution_policy = dict(substitution_policy or {})
         self.search_token_lists: list[tuple[str, ...]] = []
         self.search_token_positions: list[dict[str, tuple[int, ...]]] = []
@@ -2826,7 +3214,12 @@ class StockMatcher:
         normalized_code_index: defaultdict[str, list[int]] = defaultdict(list)
         dimension_index: defaultdict[str, list[int]] = defaultdict(list)
         dimension_group_index: defaultdict[str, list[int]] = defaultdict(list)
-        self._candidate_cache: dict[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], list[int]] = {}
+        family_index: defaultdict[str, list[int]] = defaultdict(list)
+        material_index: defaultdict[str, list[int]] = defaultdict(list)
+        attribute_index: defaultdict[str, list[int]] = defaultdict(list)
+        structure_index: defaultdict[str, list[int]] = defaultdict(list)
+        self.stock_structure_keys: list[tuple[str, ...]] = []
+        self._candidate_cache: dict[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], dict[int, tuple[str, ...]]] = {}
         self._manual_learning_cache: dict[
             tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]],
             dict[int, ManualLearningSignal],
@@ -2849,6 +3242,21 @@ class StockMatcher:
             normalized_code = normalize_candidate_code(item.code_1c)
             if normalized_code:
                 normalized_code_index[normalized_code].append(index)
+            for family in extract_tag_values(item.dimension_tags, "family:"):
+                family_index[family].append(index)
+            for tag in item.dimension_tags:
+                if tag.startswith(("mclass:", "grade:")):
+                    material_index[tag].append(index)
+                elif tag.startswith(("spec:", "conn_gender:", "subtype:", "type:", "connection:")):
+                    attribute_index[tag].append(index)
+            structure_keys = build_retrieval_structure_keys(
+                search_text=item.search_text,
+                key_tokens=item.key_tokens,
+                dimension_tags=item.dimension_tags,
+            )
+            self.stock_structure_keys.append(structure_keys)
+            for structure_key in structure_keys:
+                structure_index[structure_key].append(index)
 
             expanded_dimensions = expand_dimension_values(group_dimension_tags(item.dimension_tags))
             for key, values in expanded_dimensions.items():
@@ -2865,6 +3273,10 @@ class StockMatcher:
         self.normalized_code_index = dict(normalized_code_index)
         self.dimension_index = dict(dimension_index)
         self.dimension_group_index = dict(dimension_group_index)
+        self.family_index = dict(family_index)
+        self.material_index = dict(material_index)
+        self.attribute_index = dict(attribute_index)
+        self.structure_index = dict(structure_index)
         self.search_token_counts = np.array([len(item.search_tokens) for item in self.stock_items], dtype=np.float64)
 
     def fork(self) -> "StockMatcher":
@@ -2872,6 +3284,8 @@ class StockMatcher:
         forked.stock_items = clone_stock_items(self.stock_items)
         forked.reviewed_analog_decisions = self.reviewed_analog_decisions
         forked.manual_selection_memory = self.manual_selection_memory
+        forked.manual_selection_positive_memory = self.manual_selection_positive_memory
+        forked.manual_feedback_decisions = self.manual_feedback_decisions
         forked.substitution_policy = self.substitution_policy
         forked.search_token_lists = self.search_token_lists
         forked.search_token_positions = self.search_token_positions
@@ -2882,6 +3296,11 @@ class StockMatcher:
         forked.normalized_code_index = self.normalized_code_index
         forked.dimension_index = self.dimension_index
         forked.dimension_group_index = self.dimension_group_index
+        forked.family_index = self.family_index
+        forked.material_index = self.material_index
+        forked.attribute_index = self.attribute_index
+        forked.structure_index = self.structure_index
+        forked.stock_structure_keys = self.stock_structure_keys
         forked.search_token_counts = self.search_token_counts
         forked._candidate_cache = {}
         forked._manual_learning_cache = {}
@@ -2889,11 +3308,28 @@ class StockMatcher:
 
     def _review_decision_for_candidate(self, order: OrderLine, candidate_code: str) -> str:
         normalized_code = normalize_candidate_code(candidate_code)
-        for query_key in build_review_query_keys(order.raw_query or order.name, order.name):
+        resolved = ""
+        lookup_keys = list(
+            dict.fromkeys(
+                [
+                    *build_review_query_keys(order.raw_query or order.name, order.name, order.search_text),
+                    *build_structural_query_keys(
+                        search_text=order.search_text,
+                        key_tokens=order.key_tokens,
+                        dimension_tags=order.dimension_tags,
+                    ),
+                ]
+            )
+        )
+        for query_key in lookup_keys:
             decision = self.reviewed_analog_decisions.get(query_key, {}).get(normalized_code)
-            if decision:
+            if not decision:
+                decision = self.manual_feedback_decisions.get(query_key, {}).get(normalized_code, "")
+            if decision == REVIEW_DECISION_REJECTED:
                 return decision
-        return ""
+            if decision == REVIEW_DECISION_APPROVED:
+                resolved = decision
+        return resolved
 
     def _manual_learning_signature(
         self,
@@ -2911,20 +3347,26 @@ class StockMatcher:
         *,
         order: OrderLine,
         current_query_keys: set[str],
+        current_structure_keys: set[str],
         entry: ManualSelectionEntry,
     ) -> ManualLearningSignal | None:
+        if entry.decision == REVIEW_DECISION_REJECTED:
+            return None
         order_key_tokens = set(order.key_tokens)
         order_root_tokens = set(order.root_tokens)
         order_dimension_tags = set(order.dimension_tags)
         learned_key_tokens = set(entry.order_key_tokens)
         learned_root_tokens = set(entry.order_root_tokens)
         learned_dimension_tags = set(entry.order_dimension_tags)
+        learned_structure_keys = set(entry.structure_keys)
 
         exact_query_match = entry.query_key in current_query_keys
+        exact_structure_match = bool(current_structure_keys & learned_structure_keys)
         query_ratio = token_set_ratio(order.search_text.split(), entry.query_key.split())
         key_overlap = safe_overlap(order_key_tokens, learned_key_tokens)
         root_overlap = safe_overlap(order_root_tokens, learned_root_tokens)
         dimension_overlap = safe_overlap(order_dimension_tags, learned_dimension_tags)
+        structure_overlap = safe_overlap(current_structure_keys, learned_structure_keys)
         manual_query_ratio = (
             token_set_ratio(order.search_text.split(), entry.manual_search_query_key.split())
             if entry.manual_search_query_key
@@ -2935,18 +3377,23 @@ class StockMatcher:
         allow_incompatible = False
         reasons: list[str] = []
 
-        if exact_query_match:
+        if exact_query_match or exact_structure_match:
             boost = 34.0
             allow_incompatible = True
-            reasons.append("такую же позицию менеджер уже выбирал вручную")
-        elif query_ratio >= 86.0 or (key_overlap >= 0.75 and root_overlap >= 0.65):
+            reasons.append("такую же структурную позицию менеджер уже выбирал")
+        elif structure_overlap >= 0.75 or query_ratio >= 86.0 or (key_overlap >= 0.75 and root_overlap >= 0.65):
             boost = 24.0
             allow_incompatible = True
             reasons.append("похоже на прошлый ручной выбор менеджера")
-        elif query_ratio >= 74.0 or key_overlap >= 0.55 or (root_overlap >= 0.60 and manual_query_ratio >= 45.0):
+        elif structure_overlap >= 0.5 or query_ratio >= 74.0 or key_overlap >= 0.55 or (root_overlap >= 0.60 and manual_query_ratio >= 45.0):
             boost = 16.0
             reasons.append("есть сильное сходство с прошлым ручным выбором")
-        elif query_ratio >= 68.0 and (key_overlap >= 0.35 or root_overlap >= 0.45 or manual_query_ratio >= 60.0):
+        elif query_ratio >= 68.0 and (
+            key_overlap >= 0.35
+            or root_overlap >= 0.45
+            or manual_query_ratio >= 60.0
+            or structure_overlap >= 0.34
+        ):
             boost = 10.0
             reasons.append("учтён похожий прошлый ручной выбор")
         else:
@@ -2958,6 +3405,12 @@ class StockMatcher:
         if dimension_overlap >= 0.25:
             boost += 4.0
             reasons.append("совпадают техпараметры из прошлой ручной замены")
+        if structure_overlap >= 0.5:
+            boost += 6.0
+            reasons.append("совпадает структурный профиль товара")
+        elif structure_overlap >= 0.25:
+            boost += 3.0
+            reasons.append("близкий структурный профиль товара")
         if manual_query_ratio >= 72.0:
             boost += 3.0
             reasons.append("совпадает логика ручного поиска менеджера")
@@ -2969,7 +3422,7 @@ class StockMatcher:
         )
 
     def _manual_learning_signals(self, order: OrderLine) -> dict[int, ManualLearningSignal]:
-        if not self.manual_selection_memory:
+        if not self.manual_selection_positive_memory:
             return {}
 
         signature = self._manual_learning_signature(order)
@@ -2979,11 +3432,19 @@ class StockMatcher:
 
         current_query_keys = set(build_review_query_keys(order.raw_query or order.name, order.name, order.search_text))
         current_query_keys.add(order.search_text)
+        current_structure_keys = set(
+            build_structural_query_keys(
+                search_text=order.search_text,
+                key_tokens=order.key_tokens,
+                dimension_tags=order.dimension_tags,
+            )
+        )
         signals: dict[int, ManualLearningSignal] = {}
-        for entry in self.manual_selection_memory:
+        for entry in self.manual_selection_positive_memory:
             signal = self._signal_from_manual_entry(
                 order=order,
                 current_query_keys=current_query_keys,
+                current_structure_keys=current_structure_keys,
                 entry=entry,
             )
             if signal is None:
@@ -3114,6 +3575,93 @@ class StockMatcher:
             tuple(sorted(order.dimension_tags)),
         )
 
+    def generate_candidate_pool(self, order: OrderLine) -> dict[int, tuple[str, ...]]:
+        signature = self._order_signature(order)
+        cached = self._candidate_cache.get(signature)
+        if cached is not None:
+            return cached
+
+        candidate_sources: defaultdict[int, set[str]] = defaultdict(set)
+
+        def add_matches(matches: Iterable[int], source: str) -> None:
+            for stock_index in matches:
+                candidate_sources[int(stock_index)].add(source)
+
+        for code in order.code_tokens:
+            add_matches(self.code_index.get(code, []), "code")
+
+        informative_tokens = sorted(
+            order.key_tokens,
+            key=lambda token: (len(self.token_index.get(token, [])) or 100000, -len(token), token),
+        )
+        for token in informative_tokens[:8]:
+            matches = self.token_index.get(token, [])
+            if len(matches) == 0:
+                continue
+            add_matches(matches, "token")
+            if len(candidate_sources) >= 350:
+                break
+
+        if len(candidate_sources) < 200:
+            informative_roots = sorted(
+                order.root_tokens,
+                key=lambda token: (len(self.root_index.get(token, [])) or 100000, -len(token), token),
+            )
+            for token in informative_roots[:6]:
+                matches = self.root_index.get(token, [])
+                if len(matches) == 0:
+                    continue
+                add_matches(matches, "root")
+                if len(candidate_sources) >= 450:
+                    break
+
+        primary_families = sorted(extract_tag_values(order.dimension_tags, "family:") & PRIMARY_FAMILY_TAGS)
+        family_matches: set[int] = set()
+        for family in primary_families[:3]:
+            family_hits = self.family_index.get(family, [])
+            family_matches.update(family_hits)
+            add_matches(family_hits, "family")
+
+        retrieval_structure_keys = build_retrieval_structure_keys(
+            search_text=order.search_text,
+            key_tokens=order.key_tokens,
+            dimension_tags=order.dimension_tags,
+        )
+        for structure_key in retrieval_structure_keys[:6]:
+            add_matches(self.structure_index.get(structure_key, []), "structure")
+
+        for tag in order.dimension_tags:
+            if tag.startswith(("mclass:", "grade:")):
+                add_matches(self.material_index.get(tag, []), "material")
+            elif tag.startswith(("spec:", "conn_gender:", "subtype:", "type:", "connection:")):
+                add_matches(self.attribute_index.get(tag, []), "attribute")
+
+        dim_sets: list[set[int]] = []
+        for tag in order.dimension_tags:
+            if tag.startswith("family:") or tag.startswith("mclass:") or tag.startswith("conn_gender:"):
+                continue
+            dim_matches = self.dimension_index.get(tag, [])
+            if dim_matches:
+                dim_sets.append(set(dim_matches))
+                add_matches(dim_matches, "dimension")
+        if len(dim_sets) >= 2:
+            dim_sets.sort(key=len)
+            intersected = dim_sets[0] & dim_sets[1]
+            add_matches(intersected, "dimension_pair")
+            if family_matches:
+                add_matches(intersected & family_matches, "family_dimension")
+
+        if self.manual_selection_memory:
+            for stock_index in self._manual_learning_signals(order):
+                candidate_sources[int(stock_index)].add("memory")
+
+        resolved = {
+            stock_index: tuple(sorted(sources))
+            for stock_index, sources in candidate_sources.items()
+        }
+        self._candidate_cache[signature] = resolved
+        return resolved
+
     def _has_compatible_families(self, order: OrderLine, stock: StockItem) -> bool:
         order_families = extract_tag_values(order.dimension_tags, "family:")
         if not order_families:
@@ -3155,6 +3703,7 @@ class StockMatcher:
         order_dimensions = expand_dimension_values(group_dimension_tags(order.dimension_tags))
         stock_dimensions = expand_dimension_values(group_dimension_tags(stock.dimension_tags))
 
+        order_families = extract_tag_values(order.dimension_tags, "family:")
         stock_families = extract_tag_values(stock.dimension_tags, "family:")
         for required_key in ("tripledn", "pairdn"):
             order_values = order_dimensions.get(required_key, set())
@@ -3165,15 +3714,19 @@ class StockMatcher:
                 continue
             # Allow tees without tripledn if they share at least one DN/OD
             if required_key == "tripledn" and "tee" in stock_families:
-                order_dns = order_dimensions.get("dn", set()) | order_dimensions.get("od", set())
-                stock_dns = stock_dimensions.get("dn", set()) | stock_dimensions.get("od", set())
-                if order_dns & stock_dns:
+                order_dns = _dimension_union(order_dimensions, "dn", "od")
+                stock_dns = _dimension_union(stock_dimensions, "dn", "od")
+                if len(stock_dns) == 1 and order_dns & stock_dns:
+                    continue
+                if "tee" in order_families and stock_dimensions.get("pairdn") and order_dns & stock_dns:
                     continue
             # Allow перехода without pairdn if they share at least one DN/OD
-            if required_key == "pairdn" and "perehod" in stock_families:
-                order_dns = order_dimensions.get("dn", set()) | order_dimensions.get("od", set())
-                stock_dns = stock_dimensions.get("dn", set()) | stock_dimensions.get("od", set())
-                if order_dns & stock_dns:
+            if required_key == "pairdn" and "perehod" in order_families and "perehod" in stock_families:
+                order_dns = _dimension_union(order_dimensions, "dn", "od")
+                stock_dns = _dimension_union(stock_dimensions, "dn", "od")
+                if len(stock_dns) == 1 and order_dns & stock_dns:
+                    continue
+                if stock_dimensions.get("pairdn") and order_dns & stock_dns:
                     continue
             return False
         return True
@@ -3237,66 +3790,30 @@ class StockMatcher:
         return self._sort_candidates(filtered)
 
     def generate_candidates(self, order: OrderLine) -> list[int]:
-        signature = self._order_signature(order)
-        if signature in self._candidate_cache:
-            return self._candidate_cache[signature]
-
-        candidate_ids: set[int] = set()
-        for code in order.code_tokens:
-            candidate_ids.update(self.code_index.get(code, []))
-        informative_tokens = sorted(
-            order.key_tokens,
-            key=lambda token: (len(self.token_index.get(token, [])) or 100000, -len(token), token),
-        )
-        for token in informative_tokens[:8]:
-            matches = self.token_index.get(token, [])
-            if len(matches) == 0:
-                continue
-            candidate_ids.update(matches)
-            if len(candidate_ids) >= 350:
-                break
-        if len(candidate_ids) < 200:
-            informative_roots = sorted(
-                order.root_tokens,
-                key=lambda token: (len(self.root_index.get(token, [])) or 100000, -len(token), token),
-            )
-            for token in informative_roots[:6]:
-                matches = self.root_index.get(token, [])
-                if len(matches) == 0:
-                    continue
-                candidate_ids.update(matches)
-                if len(candidate_ids) >= 450:
-                    break
-        # Add dimension-matched candidates via intersection of 2+ dimension tags
-        dim_sets: list[set[int]] = []
-        for tag in order.dimension_tags:
-            if tag.startswith("family:") or tag.startswith("mclass:") or tag.startswith("conn_gender:"):
-                continue
-            dim_matches = self.dimension_index.get(tag, [])
-            if dim_matches:
-                dim_sets.append(set(dim_matches))
-        if len(dim_sets) >= 2:
-            # intersect smallest two sets → precise candidates
-            dim_sets.sort(key=len)
-            intersected = dim_sets[0] & dim_sets[1]
-            candidate_ids.update(intersected)
-        if self.manual_selection_memory:
-            candidate_ids.update(self._manual_learning_signals(order))
-        candidates = list(candidate_ids)
-        self._candidate_cache[signature] = candidates
-        return candidates
+        return list(self.generate_candidate_pool(order))
 
     def rank_candidates(
         self,
         order: OrderLine,
         candidate_ids: Sequence[int] | None = None,
         limit: int | None = 5,
+        candidate_pool: Mapping[int, tuple[str, ...]] | None = None,
     ) -> list[Candidate]:
+        if candidate_pool is None:
+            if candidate_ids is None:
+                candidate_pool = self.generate_candidate_pool(order)
+            else:
+                candidate_pool = {int(candidate_id): () for candidate_id in candidate_ids}
         if candidate_ids is None:
-            candidate_ids = self.generate_candidates(order)
+            candidate_ids = list(candidate_pool)
         manual_signals = self._manual_learning_signals(order)
         scored = [
-            self.score_candidate(order, self.stock_items[index], manual_learning_signal=manual_signals.get(index))
+            self.score_candidate(
+                order,
+                self.stock_items[index],
+                manual_learning_signal=manual_signals.get(index),
+                retrieval_paths=candidate_pool.get(int(index), ()),
+            )
             for index in candidate_ids
             if (
                 self.is_candidate_compatible(order, self.stock_items[index])
@@ -3313,6 +3830,7 @@ class StockMatcher:
         order: OrderLine,
         stock: StockItem,
         manual_learning_signal: ManualLearningSignal | None = None,
+        retrieval_paths: Sequence[str] = (),
     ) -> Candidate:
         query_tokens = order.search_text.split()
         stock_tokens = stock.search_text.split()
@@ -3380,6 +3898,11 @@ class StockMatcher:
         if flange_reasons:
             reasons.extend(flange_reasons)
 
+        family_profile_bonus, family_profile_reasons = family_ranking_profile_bonus(order, stock)
+        score += family_profile_bonus
+        if family_profile_reasons:
+            reasons.extend(family_profile_reasons)
+
         missing_major_tokens = [token for token in order.key_tokens if len(token) >= 5 and token not in stock.key_tokens]
         if order.key_tokens:
             penalty = 12.0 * len(missing_major_tokens) / len(order.key_tokens)
@@ -3410,6 +3933,42 @@ class StockMatcher:
             elif manual_learning_boost >= 16.0:
                 score = max(score, 56.0)
 
+        order_structure_keys = set(
+            build_retrieval_structure_keys(
+                search_text=order.search_text,
+                key_tokens=order.key_tokens,
+                dimension_tags=order.dimension_tags,
+            )
+        )
+        stock_structure_keys = set(
+            build_retrieval_structure_keys(
+                search_text=stock.search_text,
+                key_tokens=stock.key_tokens,
+                dimension_tags=stock.dimension_tags,
+            )
+        )
+        family_match = float(self._has_compatible_families(order, stock))
+        material_match = float(self._has_compatible_materials(order, stock))
+        structure_overlap = safe_overlap(order_structure_keys, stock_structure_keys)
+        feature_scores = {
+            "token_set_ratio": round(set_ratio, 3),
+            "ordered_ratio": round(ordered_ratio, 3),
+            "key_overlap": round(overlap, 4),
+            "root_overlap": round(soft_overlap, 4),
+            "family_match": family_match,
+            "material_match": material_match,
+            "structure_overlap": round(structure_overlap, 4),
+            "code_hit": float(code_hit),
+            "dn_exact": float("dn" in matched_dimension_keys),
+            "pn_exact": float("pn" in matched_dimension_keys),
+            "tripledn_exact": float("tripledn" in matched_dimension_keys),
+            "pairdn_exact": float("pairdn" in matched_dimension_keys),
+            "dimension_bonus": round(dimension_bonus, 3),
+            "dimension_penalty": round(dimension_penalty, 3),
+            "family_profile_bonus": round(family_profile_bonus, 3),
+            "manual_learning_boost": round(manual_learning_boost, 3),
+        }
+
         return Candidate(
             stock=stock,
             score=max(0.0, min(100.0, score)),
@@ -3423,10 +3982,13 @@ class StockMatcher:
             conflicting_dimension_keys=tuple(dict.fromkeys(conflicting_dimension_keys)),
             manual_learning_boost=manual_learning_boost,
             manual_learning_allowed=manual_learning_allowed,
+            retrieval_paths=tuple(dict.fromkeys(retrieval_paths)),
+            feature_scores=feature_scores,
         )
 
     def find_candidates(self, order: OrderLine, limit: int = 5) -> list[Candidate]:
-        return self.rank_candidates(order, self.generate_candidates(order), limit)
+        candidate_pool = self.generate_candidate_pool(order)
+        return self.rank_candidates(order, candidate_pool=candidate_pool, limit=limit)
 
     def find_candidates_exhaustive_reference(self, order: OrderLine, limit: int | None = 5) -> list[Candidate]:
         return self.rank_candidates(order, range(len(self.stock_items)), limit)
@@ -3610,6 +4172,9 @@ class StockMatcher:
         flange_bonus, flange_reasons = flange_preference_bonus(order, stock)
         if flange_bonus and flange_reasons:
             reasons.extend(flange_reasons)
+        family_profile_bonus, family_profile_reasons = family_ranking_profile_bonus(order, stock)
+        if family_profile_bonus and family_profile_reasons:
+            reasons.extend(family_profile_reasons)
         if missing_penalty[stock_index] >= 6.0:
             reasons.append("не хватает ключевых слов")
         fuzzy_bonus, fuzzy_reasons = fuzzy_rerank_bonus(order.search_text, stock.search_text)
@@ -3622,9 +4187,35 @@ class StockMatcher:
             reasons.extend(fuzzy_reasons)
         if stock.remaining <= 0:
             reasons.append("остаток уже исчерпан")
+        order_structure_keys = set(
+            build_retrieval_structure_keys(
+                search_text=order.search_text,
+                key_tokens=order.key_tokens,
+                dimension_tags=order.dimension_tags,
+            )
+        )
+        stock_structure_keys = set(self.stock_structure_keys[stock_index])
+        feature_scores = {
+            "token_set_ratio": 0.0,
+            "ordered_ratio": 0.0,
+            "key_overlap": round(float(overlap[stock_index]), 4),
+            "root_overlap": round(float(soft_overlap[stock_index]), 4),
+            "family_match": float(self._has_compatible_families(order, stock)),
+            "material_match": float(self._has_compatible_materials(order, stock)),
+            "structure_overlap": round(safe_overlap(order_structure_keys, stock_structure_keys), 4),
+            "code_hit": float(bool(code_hits[stock_index])),
+            "dn_exact": float("dn" in matched_dimension_keys),
+            "pn_exact": float("pn" in matched_dimension_keys),
+            "tripledn_exact": float("tripledn" in matched_dimension_keys),
+            "pairdn_exact": float("pairdn" in matched_dimension_keys),
+            "dimension_bonus": round(float(dimension_bonus[stock_index]), 3),
+            "dimension_penalty": round(float(dimension_penalty[stock_index]), 3),
+            "family_profile_bonus": round(float(family_profile_bonus), 3),
+            "manual_learning_boost": 0.0,
+        }
         return Candidate(
             stock=stock,
-            score=score,
+            score=max(0.0, min(100.0, score + family_profile_bonus)),
             overlap=float(overlap[stock_index]),
             soft_overlap=float(soft_overlap[stock_index]),
             reasons=reasons,
@@ -3633,6 +4224,8 @@ class StockMatcher:
             dimension_penalty=float(dimension_penalty[stock_index]),
             matched_dimension_keys=tuple(dict.fromkeys(matched_dimension_keys)),
             conflicting_dimension_keys=tuple(dict.fromkeys(conflicting_dimension_keys)),
+            retrieval_paths=("exhaustive",),
+            feature_scores=feature_scores,
         )
 
     def find_candidates_exhaustive(self, order: OrderLine, limit: int | None = 5) -> list[Candidate]:
@@ -4532,7 +5125,7 @@ def main() -> int:
         else DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH
     )
     reviewed_decisions = load_reviewed_analog_decisions(reviewed_decisions_path)
-    manual_selection_memory = load_manual_selection_memory(DEFAULT_MANUAL_SELECTION_MEMORY_PATH)
+    manual_selection_memory = load_default_manual_selection_memory()
     substitution_policy = load_substitution_policy()
 
     base_stock_items = load_stock(stock_path)

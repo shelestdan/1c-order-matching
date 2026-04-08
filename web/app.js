@@ -416,6 +416,44 @@ function esc(str) {
     .replace(/"/g, '&quot;');
 }
 
+function mergeVisibleCandidates(...groups) {
+  const byCode = new Map();
+  groups.forEach((group) => {
+    (group || []).forEach((candidate) => {
+      if (!candidate || !candidate.code_1c || !candidate.name) return;
+      const code = String(candidate.code_1c).trim();
+      if (!code) return;
+      const current = byCode.get(code);
+      if (!current) {
+        byCode.set(code, { ...candidate });
+        return;
+      }
+      if ((!current.reasons || current.reasons.length === 0) && candidate.reasons?.length) {
+        current.reasons = [...candidate.reasons];
+      }
+      if (!current.source_label && candidate.source_label) {
+        current.source_label = candidate.source_label;
+      }
+      if ((Number(candidate.score) || 0) > (Number(current.score) || 0)) {
+        current.score = candidate.score;
+      }
+      if ((current.remaining == null || current.remaining === '') && candidate.remaining != null) {
+        current.remaining = candidate.remaining;
+      }
+      if ((current.stock_qty == null || current.stock_qty === '') && candidate.stock_qty != null) {
+        current.stock_qty = candidate.stock_qty;
+      }
+      if (!current.price && candidate.price) {
+        current.price = candidate.price;
+      }
+      if (candidate.manager_choice) {
+        current.manager_choice = true;
+      }
+    });
+  });
+  return Array.from(byCode.values());
+}
+
 /* ===== Analog Modal ===== */
 let modalRowId = null;
 
@@ -476,12 +514,14 @@ document.addEventListener('keydown', (e) => {
 
 async function selectAnalog(rowId, code) {
   pendingApprovals[rowId] = code;
+  const row = allRows.find(r => r.id === rowId);
+  const visibleCandidates = mergeVisibleCandidates(row?.analogs || [], searchResultsByRow[rowId] || []);
 
   const res = await apiFetch(`/api/jobs/${currentJob.job_id}/approve`, 'POST', {
-    approvals: { [rowId]: code }
+    approvals: { [rowId]: code },
+    candidate_pools: { [rowId]: visibleCandidates },
   });
 
-  const row = allRows.find(r => r.id === rowId);
   if (row) {
     const analog = row.analogs.find(a => a.code_1c === code);
     if (analog) {
@@ -601,18 +641,19 @@ async function chooseCandidate(rowId, source, code, button) {
   }
   try {
     const searchQuery = document.getElementById('manual-search-input')?.value?.trim() || '';
+    const row = allRows.find(r => r.id === rowId);
+    const visibleCandidates = mergeVisibleCandidates(row?.analogs || [], candidates);
     const res = await apiFetch(`/api/jobs/${currentJob.job_id}/select`, 'POST', {
       row_id: rowId,
       candidate,
       search_query: searchQuery,
+      visible_candidates: visibleCandidates,
     });
     pendingApprovals[rowId] = code;
-    const row = allRows.find(r => r.id === rowId);
     if (row) {
-      const approved = res.row?.approved_analog || candidate;
-      row.approved_analog = approved;
-      row.status = res.row?.status || 'Одобрена замена';
+      Object.assign(row, res.row || {});
       row.analogs = row.analogs || [];
+      const approved = row.approved_analog || candidate;
       if (!row.analogs.some(a => a.code_1c === approved.code_1c)) {
         row.analogs.unshift(approved);
       }

@@ -36,13 +36,12 @@ from process_1c_orders import (
     should_ignore_parser_row,
     strip_parser_body_noise,
     coalesce_material_fields,
+    detect_header_rows,
     extract_code_tokens,
     format_number,
-    infer_column_defaults,
     get_mapped_quantity,
     get_mapped_text,
     parse_quantity,
-    score_header_row,
 )
 
 STANDARD_HEADERS = [
@@ -218,19 +217,7 @@ def add_row(ws, values: Iterable[object]) -> None:
 
 
 def detect_header_from_rows(rows: list[list[object]]) -> tuple[int, dict[str, int], list[str]]:
-    best_row = 0
-    best_mapping: dict[str, int] = {}
-    best_headers: list[str] = []
-    best_score = -1
-    for row_index, row in enumerate(rows[:30]):
-        score, mapping = score_header_row(row)
-        if score > best_score:
-            best_score = score
-            best_row = row_index
-            best_mapping = mapping
-            best_headers = [clean_text(value) for value in row]
-    best_mapping = infer_column_defaults(rows, best_mapping, best_row)
-    return best_row, best_mapping, best_headers
+    return detect_header_rows(rows, max_scan_rows=30)
 
 
 def read_text_with_fallbacks(path: Path) -> str:
@@ -259,12 +246,16 @@ def read_docx_text(path: Path) -> str:
 
 def looks_like_header(line: str) -> bool:
     lowered = line.lower()
-    has_name = "наимен" in lowered or "материал" in lowered or "товар" in lowered or "номенклат" in lowered or "продукц" in lowered
-    has_qty = "колич" in lowered or "кол-во" in lowered or "кол во" in lowered or "qty" in lowered
-    has_position = "позиц" in lowered
+    has_name = any(token in lowered for token in ("наимен", "материал", "товар", "номенклат", "продукц", "описан", "характер"))
+    has_qty = any(token in lowered for token in ("колич", "кол-во", "кол во", "qty", "колво", "всего кол"))
+    has_position = any(token in lowered for token in ("позиц", "номер", "№"))
+    has_unit = any(token in lowered for token in ("ед. изм", "ед изм", "единиц", "измер"))
+    has_vendor = any(token in lowered for token in ("производ", "бренд", "постав", "изготов"))
     return (
         has_name and has_qty
         or (has_position and has_name)
+        or (has_name and has_unit)
+        or (has_name and has_vendor)
     )
 
 

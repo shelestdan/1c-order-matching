@@ -226,6 +226,41 @@ class MatchingApiHelpersTest(unittest.TestCase):
         self.assertEqual(top["times_learned"], 2)
         self.assertEqual(top["used_by_count"], 1)
 
+    def test_admin_analytics_uses_feedback_entries_for_learning_before_export(self) -> None:
+        analytics = _build_admin_analytics(
+            {"exports": []},
+            self.user_directory,
+            feedback_entries=[
+                {
+                    "snapshot_id": "job-1:row-1",
+                    "decision": "approved",
+                    "candidate_code": "009",
+                    "candidate_name": "Фланец Ду40 PN16",
+                    "selected_by": "anisovets",
+                    "selected_by_display": "Анисовец",
+                    "selected_at": "2026-04-08T10:00:00Z",
+                },
+                {
+                    "snapshot_id": "job-1:row-1",
+                    "decision": "rejected",
+                    "candidate_code": "010",
+                    "candidate_name": "Фланец Ду40 PN10",
+                    "selected_by": "anisovets",
+                    "selected_by_display": "Анисовец",
+                    "selected_at": "2026-04-08T10:00:00Z",
+                },
+            ],
+        )
+
+        self.assertEqual(analytics["summary"]["saved_files"], 0)
+        self.assertEqual(analytics["summary"]["learned_replacement_count"], 1)
+        users = analytics["users"]
+        anisovets = next(item for item in users if item["username"] == "anisovets")
+        self.assertEqual(anisovets["learned_replacement_count"], 1)
+        top = analytics["top_replacements"][0]
+        self.assertEqual(top["candidate_code"], "009")
+        self.assertEqual(top["times_learned"], 1)
+
     def test_serialize_candidate_keeps_stock_quantity_separate_from_free_remaining(self) -> None:
         stock = StockItem(
             row_index=1,
@@ -253,11 +288,15 @@ class MatchingApiHelpersTest(unittest.TestCase):
                 overlap=1.0,
                 soft_overlap=1.0,
                 reasons=["совпал код/марка"],
+                retrieval_paths=("structure", "family"),
+                feature_scores={"family_match": 1.0, "dn_exact": 1.0},
             )
         )
 
         self.assertEqual(payload["stock_qty"], 240.0)
         self.assertEqual(payload["remaining"], 88.0)
+        self.assertEqual(payload["retrieval_paths"], ["structure", "family"])
+        self.assertEqual(payload["feature_scores"]["family_match"], 1.0)
 
 
 if __name__ == "__main__":
