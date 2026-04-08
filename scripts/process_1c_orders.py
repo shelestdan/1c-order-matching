@@ -29,6 +29,7 @@ from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -37,6 +38,13 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from rapidfuzz import fuzz
 
+from matching_retrieval import (
+    build_candidate_source_map,
+    build_retrieval_structure_keys_impl,
+    build_structural_query_keys_impl,
+)
+from matching_ranking import rank_candidates_impl
+from matching_trace import CandidateTrace, MatchTrace
 from nomenclature_classifier import ClassificationStatus, QueryClassification, load_default_classifier
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -860,46 +868,19 @@ def build_structural_query_keys(
     key_tokens: Iterable[str] = (),
     dimension_tags: Iterable[str] = (),
 ) -> tuple[str, ...]:
-    tags = set(dimension_tags)
-    grouped = expand_dimension_values(group_dimension_tags(tags))
-    families = sorted(extract_tag_values(tags, "family:") & PRIMARY_FAMILY_TAGS)
-    if not families:
-        families = sorted(extract_tag_values(tags, "family:"))
-
-    def pack(parts: Sequence[str]) -> str:
-        return "|".join(part for part in parts if part)
-
-    def encode_values(key: str) -> str:
-        values = sorted(grouped.get(key, set()))
-        if not values:
-            return ""
-        return f"{key}=" + ",".join(values)
-
-    informative_tokens = [
-        token
-        for token in sorted(set(key_tokens))
-        if len(token) >= 4 and not token.isdigit() and token not in MEMORY_GENERIC_KEY_TOKENS
-    ]
-
-    family_part = f"family={','.join(families)}" if families else ""
-    core_parts = [family_part] + [encode_values(key) for key in ("tripledn", "pairdn", "dn", "od", "inch", "wall", "pn", "mclass", "grade")]
-    expanded_parts = [family_part] + [encode_values(key) for key in MEMORY_STRUCTURED_PRIORITY]
-    token_part = f"tokens={','.join(informative_tokens[:3])}" if informative_tokens else ""
-
-    keys: list[str] = []
-    for candidate in (
-        pack(expanded_parts),
-        pack(core_parts),
-        pack([family_part, encode_values("tripledn"), encode_values("pairdn"), encode_values("dn"), encode_values("od"), encode_values("inch")]),
-        pack([family_part, encode_values("dn"), encode_values("pn"), encode_values("mclass"), encode_values("grade")]),
-        pack([family_part, token_part]),
-        token_part,
-        build_search_text(search_text),
-    ):
-        normalized = clean_text(candidate)
-        if normalized and normalized not in keys:
-            keys.append(normalized)
-    return tuple(keys)
+    return build_structural_query_keys_impl(
+        search_text=search_text,
+        key_tokens=key_tokens,
+        dimension_tags=dimension_tags,
+        expand_dimension_values_fn=expand_dimension_values,
+        group_dimension_tags_fn=group_dimension_tags,
+        extract_tag_values_fn=extract_tag_values,
+        primary_family_tags=PRIMARY_FAMILY_TAGS,
+        memory_generic_key_tokens=MEMORY_GENERIC_KEY_TOKENS,
+        memory_structured_priority=MEMORY_STRUCTURED_PRIORITY,
+        build_search_text_fn=build_search_text,
+        clean_text_fn=clean_text,
+    )
 
 
 def build_retrieval_structure_keys(
@@ -908,14 +889,18 @@ def build_retrieval_structure_keys(
     key_tokens: Iterable[str] = (),
     dimension_tags: Iterable[str] = (),
 ) -> tuple[str, ...]:
-    return tuple(
-        key
-        for key in build_structural_query_keys(
-            search_text=search_text,
-            key_tokens=key_tokens,
-            dimension_tags=dimension_tags,
-        )
-        if "=" in key
+    return build_retrieval_structure_keys_impl(
+        search_text=search_text,
+        key_tokens=key_tokens,
+        dimension_tags=dimension_tags,
+        expand_dimension_values_fn=expand_dimension_values,
+        group_dimension_tags_fn=group_dimension_tags,
+        extract_tag_values_fn=extract_tag_values,
+        primary_family_tags=PRIMARY_FAMILY_TAGS,
+        memory_generic_key_tokens=MEMORY_GENERIC_KEY_TOKENS,
+        memory_structured_priority=MEMORY_STRUCTURED_PRIORITY,
+        build_search_text_fn=build_search_text,
+        clean_text_fn=clean_text,
     )
 
 
@@ -1809,14 +1794,71 @@ def extract_root_tokens(tokens: Iterable[str]) -> set[str]:
     return {token_root(token) for token in tokens if token}
 
 
+_MATERIAL_GRADE_CODE_TOKEN_RE = re.compile(
+    r"^(?:ct\.?\d+|st\.?\d+|09g2s|12x18h10t|12kh18n10t|aisi\d+|a351|cf8[m]?|ggg\d+|"
+    r"vch\d+|sch\d+|l?63|cw617n|cuzn\d+)$",
+    re.IGNORECASE,
+)
+_DIMENSION_LIKE_CODE_TOKEN_RE = re.compile(r"^\d+(?:[-./+=]?\d+)*(?:[xхh]\d+)+(?:[-./+=]?\d+)*$", re.IGNORECASE)
+_NUMERIC_CHAIN_CODE_TOKEN_RE = re.compile(r"^\d+(?:[-./+=]\d+)+$", re.IGNORECASE)
+_SIZE_PAIR_RE = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*[xх]\s*(\d+(?:[.,]\d+)?)(?!\d)", re.IGNORECASE)
+
+
+def _normalize_size_pair_number(value: str) -> str:
+    normalized = fix_mixed_script_token(clean_text(value)).lower().replace(",", ".")
+    if not normalized:
+        return ""
+    try:
+        numeric = float(normalized)
+    except ValueError:
+        return normalized
+    if numeric.is_integer():
+        return str(int(numeric))
+    return f"{numeric:.3f}".rstrip("0").rstrip(".")
+
+
+@lru_cache(maxsize=50000)
+def _extract_size_pair_signatures_cached(text: str) -> frozenset[str]:
+    normalized = fix_mixed_script_token(normalize_symbols(clean_text(text))).lower()
+    if not normalized:
+        return frozenset()
+    signatures: set[str] = set()
+    for left, right in _SIZE_PAIR_RE.findall(normalized):
+        left_norm = _normalize_size_pair_number(left)
+        right_norm = _normalize_size_pair_number(right)
+        if left_norm and right_norm:
+            signatures.add(f"{left_norm}x{right_norm}")
+    return frozenset(signatures)
+
+
+def extract_size_pair_signatures(*parts: object) -> set[str]:
+    combined = " ".join(part for part in (clean_text(part) for part in parts) if part)
+    return set(_extract_size_pair_signatures_cached(combined))
+
+
+def is_strong_ranking_code_token(token: str) -> bool:
+    normalized = fix_mixed_script_token(clean_text(token)).lower().replace("х", "x")
+    if not normalized:
+        return False
+    if normalized.startswith(("gost", "goct", "dn", "du", "pn", "ru", "kvs", "l=")):
+        return False
+    if _MATERIAL_GRADE_CODE_TOKEN_RE.fullmatch(normalized):
+        return False
+    if _NUMERIC_CHAIN_CODE_TOKEN_RE.fullmatch(normalized):
+        return False
+    if _DIMENSION_LIKE_CODE_TOKEN_RE.fullmatch(normalized):
+        return False
+    letter_count = sum(char.isalpha() for char in normalized)
+    digit_count = sum(char.isdigit() for char in normalized)
+    if digit_count == 0:
+        return False
+    if letter_count >= 2:
+        return True
+    return any(symbol in normalized for symbol in (".", "/", "+", "="))
+
+
 def extract_code_tokens(*parts: object) -> set[str]:
     tokens: set[str] = set()
-    # Material grade patterns to exclude from code tokens — these are NOT product codes
-    _MATERIAL_GRADE_RE = re.compile(
-        r"^(?:ct\.?\d+|st\.?\d+|09g2s|12x18h10t|12kh18n10t|aisi\d+|a351|cf8[m]?|ggg\d+|"
-        r"vch\d+|sch\d+|l?63|cw617n|cuzn\d+)$",
-        re.IGNORECASE,
-    )
     for part in parts:
         raw = normalize_symbols(clean_text(part))
         if not raw:
@@ -1856,7 +1898,7 @@ def extract_code_tokens(*parts: object) -> set[str]:
                 continue
             if len(skeleton) >= 3:
                 # Filter out material grades — they are NOT product codes
-                if _MATERIAL_GRADE_RE.fullmatch(skeleton):
+                if _MATERIAL_GRADE_CODE_TOKEN_RE.fullmatch(skeleton):
                     continue
                 tokens.add(skeleton)
     return tokens
@@ -1901,17 +1943,29 @@ def normalize_multi_measure_tag(*values: str) -> str:
     return "x".join(ordered)
 
 
+_ELBOW_ANGLE_SERIES_PREFIX_RE = re.compile(
+    r"\b(15|30|45|60|87(?:[.,]5)?|90|120|180)\s*-\s*([12])\s*-\s*(?=\d{2,4}\s*[xхh])",
+    re.IGNORECASE,
+)
+
+
+def strip_elbow_angle_series_prefix(text: str) -> str:
+    return _ELBOW_ANGLE_SERIES_PREFIX_RE.sub("", text)
+
+
 def extract_dimension_tags(*parts: object) -> set[str]:
     raw_text = normalize_symbols(" ".join(clean_text(part) for part in parts if clean_text(part))).lower()
     text = normalize_measure_text(*parts)
     search_text = build_search_text(*parts)
     family_tags = extract_family_tags(*parts)
     families = extract_tag_values(family_tags, "family:")
+    has_elbow_compound_geometry = "elbow" in families and bool(_ELBOW_ANGLE_SERIES_PREFIX_RE.search(text))
     text_without_grade_sizes = re.sub(
         r"\b(?:0[38]|12)\d?\s*[xхh]\s*\d{2}\s*[hn]\s*\d{2}(?:\s*[tm]\s*\d?)?\b",
         " ",
         text,
     )
+    generic_size_text = strip_elbow_angle_series_prefix(text_without_grade_sizes) if has_elbow_compound_geometry else text_without_grade_sizes
     tags: set[str] = set()
     for match in re.findall(r"\bdn(?:\.|-)?\s*([0-9]+(?:[.,][0-9]+)?)", text):
         tags.add(f"dn:{match.replace(',', '.')}")
@@ -1974,7 +2028,7 @@ def extract_dimension_tags(*parts: object) -> set[str]:
         add_degree_tag(tags, deg_value)
     for outer, wall in re.findall(
         r"(?<![a-zа-я0-9])(\d{1,4}(?:[.,]\d+)?)\s*[xхh]\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9/])",
-        text_without_grade_sizes,
+        generic_size_text,
     ):
         normalized_outer = outer.replace(",", ".")
         normalized_wall = wall.replace(",", ".")
@@ -1984,7 +2038,7 @@ def extract_dimension_tags(*parts: object) -> set[str]:
         tags.add(f"wall:{normalized_wall}")
     for outer, wall in re.findall(
         r"(?<![a-zа-я0-9])(\d{1,4}(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9])",
-        text_without_grade_sizes,
+        generic_size_text,
     ):
         normalized_outer = outer.replace(",", ".")
         normalized_wall = wall.replace(",", ".")
@@ -2125,7 +2179,7 @@ def extract_dimension_tags(*parts: object) -> set[str]:
         cleaned = token.strip(".,;:()[]{}")
         if re.fullmatch(r"\d{2,4}(?:\.\d+)?", cleaned):
             numeric_tokens.append(normalize_measure_value(cleaned))
-    if "dn:" not in "".join(tags) and numeric_tokens:
+    if "dn:" not in "".join(tags) and numeric_tokens and not has_elbow_compound_geometry:
         size_candidates = [
             value for value in numeric_tokens
             if value not in degree_values and 10.0 <= float(value) <= 400.0
@@ -3228,6 +3282,7 @@ class StockMatcher:
             tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]],
             dict[int, ManualLearningSignal],
         ] = {}
+        self._match_trace_cache: dict[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], MatchTrace] = {}
         for index, item in enumerate(self.stock_items):
             token_list = tuple(item.search_text.split())
             token_positions: defaultdict[str, list[int]] = defaultdict(list)
@@ -3308,6 +3363,7 @@ class StockMatcher:
         forked.search_token_counts = self.search_token_counts
         forked._candidate_cache = {}
         forked._manual_learning_cache = {}
+        forked._match_trace_cache = {}
         return forked
 
     def _review_decision_for_candidate(self, order: OrderLine, candidate_code: str) -> str:
@@ -3334,6 +3390,32 @@ class StockMatcher:
             if decision == REVIEW_DECISION_APPROVED:
                 resolved = decision
         return resolved
+
+    def _set_match_trace(self, order: OrderLine, trace: MatchTrace) -> None:
+        self._match_trace_cache[self._order_signature(order)] = trace
+
+    def _get_match_trace(self, order: OrderLine) -> MatchTrace | None:
+        return self._match_trace_cache.get(self._order_signature(order))
+
+    def _build_candidate_traces(self, order: OrderLine, candidates: Sequence[Candidate]) -> tuple[CandidateTrace, ...]:
+        traces: list[CandidateTrace] = []
+        for candidate in candidates:
+            compatibility_passed = self.is_candidate_compatible(order, candidate.stock)
+            manual_override_used = not compatibility_passed and candidate.manual_learning_allowed
+            traces.append(
+                CandidateTrace(
+                    stock_code=candidate.stock.code_1c,
+                    retrieval_paths=tuple(candidate.retrieval_paths),
+                    compatibility_passed=compatibility_passed,
+                    manual_override_used=manual_override_used,
+                    review_decision=candidate.review_decision,
+                    manual_learning_boost=candidate.manual_learning_boost,
+                    manual_learning_allowed=candidate.manual_learning_allowed,
+                    score=candidate.score,
+                    feature_scores=dict(candidate.feature_scores),
+                )
+            )
+        return tuple(traces)
 
     def _manual_learning_signature(
         self,
@@ -3467,6 +3549,10 @@ class StockMatcher:
             key=lambda candidate: (
                 candidate.score,
                 candidate.review_decision == REVIEW_DECISION_APPROVED,
+                float((candidate.feature_scores or {}).get("size_pair_hit", 0.0)),
+                -candidate.dimension_penalty,
+                len(candidate.matched_dimension_keys),
+                -len(candidate.conflicting_dimension_keys),
                 candidate.code_hit,
                 candidate.stock.remaining > 0,
                 candidate.stock.remaining,
@@ -3585,84 +3671,32 @@ class StockMatcher:
         if cached is not None:
             return cached
 
-        candidate_sources: defaultdict[int, set[str]] = defaultdict(set)
-
-        def add_matches(matches: Iterable[int], source: str) -> None:
-            for stock_index in matches:
-                candidate_sources[int(stock_index)].add(source)
-
-        for code in order.code_tokens:
-            add_matches(self.code_index.get(code, []), "code")
-
-        informative_tokens = sorted(
-            order.key_tokens,
-            key=lambda token: (len(self.token_index.get(token, [])) or 100000, -len(token), token),
-        )
-        for token in informative_tokens[:8]:
-            matches = self.token_index.get(token, [])
-            if len(matches) == 0:
-                continue
-            add_matches(matches, "token")
-            if len(candidate_sources) >= 350:
-                break
-
-        if len(candidate_sources) < 200:
-            informative_roots = sorted(
-                order.root_tokens,
-                key=lambda token: (len(self.root_index.get(token, [])) or 100000, -len(token), token),
-            )
-            for token in informative_roots[:6]:
-                matches = self.root_index.get(token, [])
-                if len(matches) == 0:
-                    continue
-                add_matches(matches, "root")
-                if len(candidate_sources) >= 450:
-                    break
-
         primary_families = sorted(extract_tag_values(order.dimension_tags, "family:") & PRIMARY_FAMILY_TAGS)
-        family_matches: set[int] = set()
-        for family in primary_families[:3]:
-            family_hits = self.family_index.get(family, [])
-            family_matches.update(family_hits)
-            add_matches(family_hits, "family")
-
         retrieval_structure_keys = build_retrieval_structure_keys(
             search_text=order.search_text,
             key_tokens=order.key_tokens,
             dimension_tags=order.dimension_tags,
         )
-        for structure_key in retrieval_structure_keys[:6]:
-            add_matches(self.structure_index.get(structure_key, []), "structure")
-
-        for tag in order.dimension_tags:
-            if tag.startswith(("mclass:", "grade:")):
-                add_matches(self.material_index.get(tag, []), "material")
-            elif tag.startswith(("spec:", "conn_gender:", "subtype:", "type:", "connection:")):
-                add_matches(self.attribute_index.get(tag, []), "attribute")
-
-        dim_sets: list[set[int]] = []
-        for tag in order.dimension_tags:
-            if tag.startswith("family:") or tag.startswith("mclass:") or tag.startswith("conn_gender:"):
-                continue
-            dim_matches = self.dimension_index.get(tag, [])
-            if dim_matches:
-                dim_sets.append(set(dim_matches))
-                add_matches(dim_matches, "dimension")
-        if len(dim_sets) >= 2:
-            dim_sets.sort(key=len)
-            intersected = dim_sets[0] & dim_sets[1]
-            add_matches(intersected, "dimension_pair")
-            if family_matches:
-                add_matches(intersected & family_matches, "family_dimension")
-
+        manual_signal_indexes: tuple[int, ...] = ()
         if self.manual_selection_memory:
-            for stock_index in self._manual_learning_signals(order):
-                candidate_sources[int(stock_index)].add("memory")
-
-        resolved = {
-            stock_index: tuple(sorted(sources))
-            for stock_index, sources in candidate_sources.items()
-        }
+            manual_signal_indexes = tuple(self._manual_learning_signals(order))
+        resolved = build_candidate_source_map(
+            code_tokens=order.code_tokens,
+            key_tokens=order.key_tokens,
+            root_tokens=order.root_tokens,
+            dimension_tags=order.dimension_tags,
+            primary_families=primary_families,
+            retrieval_structure_keys=retrieval_structure_keys,
+            code_index=self.code_index,
+            token_index=self.token_index,
+            root_index=self.root_index,
+            family_index=self.family_index,
+            structure_index=self.structure_index,
+            material_index=self.material_index,
+            attribute_index=self.attribute_index,
+            dimension_index=self.dimension_index,
+            manual_signal_indexes=manual_signal_indexes,
+        )
         self._candidate_cache[signature] = resolved
         return resolved
 
@@ -3805,31 +3839,42 @@ class StockMatcher:
         limit: int | None = 5,
         candidate_pool: Mapping[int, tuple[str, ...]] | None = None,
     ) -> list[Candidate]:
-        if candidate_pool is None:
-            if candidate_ids is None:
-                candidate_pool = self.generate_candidate_pool(order)
-            else:
-                candidate_pool = {int(candidate_id): () for candidate_id in candidate_ids}
-        if candidate_ids is None:
-            candidate_ids = list(candidate_pool)
         manual_signals = self._manual_learning_signals(order)
-        scored = [
-            self.score_candidate(
-                order,
-                self.stock_items[index],
-                manual_learning_signal=manual_signals.get(index),
-                retrieval_paths=candidate_pool.get(int(index), ()),
-            )
-            for index in candidate_ids
-            if (
-                self.is_candidate_compatible(order, self.stock_items[index])
-                or bool(manual_signals.get(index) and manual_signals[index].allow_incompatible)
-            )
-        ]
-        scored = self._sort_candidates(self._apply_reviewed_candidate_decisions(order, scored))
-        if limit is None:
-            return scored
-        return scored[:limit]
+        ranked = rank_candidates_impl(
+            order=order,
+            stock_items=self.stock_items,
+            candidate_ids=candidate_ids,
+            candidate_pool=candidate_pool,
+            limit=limit,
+            generate_candidate_pool_fn=self.generate_candidate_pool,
+            manual_signals=manual_signals,
+            is_candidate_compatible_fn=self.is_candidate_compatible,
+            score_candidate_fn=self.score_candidate,
+            apply_reviewed_candidate_decisions_fn=self._apply_reviewed_candidate_decisions,
+            sort_candidates_fn=self._sort_candidates,
+        )
+        resolved_candidate_pool = candidate_pool
+        if resolved_candidate_pool is None:
+            if candidate_ids is None:
+                resolved_candidate_pool = self.generate_candidate_pool(order)
+            else:
+                resolved_candidate_pool = {int(candidate_id): () for candidate_id in candidate_ids}
+        current_trace = self._get_match_trace(order)
+        self._set_match_trace(
+            order,
+            MatchTrace(
+                query=order.raw_query or order.name,
+                candidate_pool_size=len(resolved_candidate_pool),
+                ranked_candidate_count=len(ranked),
+                candidates=self._build_candidate_traces(order, ranked),
+                decision_kind=current_trace.decision_kind if current_trace else "",
+                decision_reason=current_trace.decision_reason if current_trace else "",
+                final_status=current_trace.final_status if current_trace else "",
+                fallback_used=current_trace.fallback_used if current_trace else False,
+                fallback_replaced=current_trace.fallback_replaced if current_trace else False,
+            ),
+        )
+        return ranked
 
     def score_candidate(
         self,
@@ -3851,16 +3896,17 @@ class StockMatcher:
         if order.code_tokens and stock.code_tokens:
             shared_codes = order.code_tokens & stock.code_tokens
             if shared_codes:
-                # Require at least one shared code that is 4+ chars or contains a dot/slash
-                # (filters out trivially short matches like "l63")
-                meaningful = any(
-                    len(c) >= 4 or "." in c or "/" in c
-                    for c in shared_codes
-                )
-                if meaningful:
+                meaningful_codes = {code for code in shared_codes if is_strong_ranking_code_token(code)}
+                if meaningful_codes:
                     code_hit = True
                     score += 18.0
                     reasons.append("совпадает код/марка")
+
+        order_size_pairs = extract_size_pair_signatures(order.raw_query or order.name)
+        stock_size_pairs = extract_size_pair_signatures(stock.name, stock.print_name, stock.product_type)
+        size_pair_hit = bool(order_size_pairs and stock_size_pairs and order_size_pairs & stock_size_pairs)
+        if size_pair_hit:
+            reasons.append("совпадает размерный шаблон")
 
         order_dimensions = expand_dimension_values(group_dimension_tags(order.dimension_tags))
         stock_dimensions = expand_dimension_values(group_dimension_tags(stock.dimension_tags))
@@ -3964,6 +4010,7 @@ class StockMatcher:
             "family_match": family_match,
             "material_match": material_match,
             "structure_overlap": round(structure_overlap, 4),
+            "size_pair_hit": float(size_pair_hit),
             "code_hit": float(code_hit),
             "dn_exact": float("dn" in matched_dimension_keys),
             "pn_exact": float("pn" in matched_dimension_keys),
@@ -4037,12 +4084,9 @@ class StockMatcher:
             root_hits = self._accumulate_token_hits(order.root_tokens, self.root_index)
             soft_overlap = root_hits / float(len(order.root_tokens))
 
-        # Only count meaningful code tokens (len >= 4 or contains "." or "/")
-        # to match the same filter applied in score_candidate().
-        meaningful_order_codes = {
-            c for c in order.code_tokens
-            if len(c) >= 4 or "." in c or "/" in c
-        }
+        # Only count strong code tokens to avoid pseudo-code hits on dimension templates
+        # like "90-2-57x4-20" or shared standard abbreviations like "gost".
+        meaningful_order_codes = {c for c in order.code_tokens if is_strong_ranking_code_token(c)}
         code_hits = np.zeros(stock_count, dtype=bool)
         for token in meaningful_order_codes:
             matches = self.code_index.get(token, [])
@@ -4103,10 +4147,17 @@ class StockMatcher:
             search_hits,
         )
 
-    def _candidate_sort_key_from_values(self, stock_index: int, score: float, code_hit: bool) -> tuple[float, bool, bool, float, int]:
+    def _candidate_sort_key_from_values(
+        self,
+        stock_index: int,
+        score: float,
+        code_hit: bool,
+        size_pair_hit: bool = False,
+    ) -> tuple[float, bool, bool, bool, float, int]:
         stock = self.stock_items[stock_index]
         return (
             score,
+            size_pair_hit,
             code_hit,
             stock.remaining > 0,
             stock.remaining,
@@ -4310,6 +4361,10 @@ class StockMatcher:
 
     def classify(self, order: OrderLine, candidates: Sequence[Candidate]) -> tuple[str, Candidate | None, str]:
         if not candidates:
+            trace = self._get_match_trace(order) or MatchTrace(query=order.raw_query or order.name)
+            trace.decision_kind = "not_found"
+            trace.decision_reason = "ничего не нашлось"
+            self._set_match_trace(order, trace)
             return "not_found", None, "ничего не нашлось"
         best = candidates[0]
         second = candidates[1] if len(candidates) > 1 else None
@@ -4319,45 +4374,52 @@ class StockMatcher:
         generic_exact_allowed = not policy or bool(policy.get("allow_exact"))
         exact_learning_block = best.manual_learning_allowed
 
+        def finalize(kind: str, candidate: Candidate | None, reason: str) -> tuple[str, Candidate | None, str]:
+            trace = self._get_match_trace(order) or MatchTrace(query=order.raw_query or order.name)
+            trace.decision_kind = kind
+            trace.decision_reason = reason
+            self._set_match_trace(order, trace)
+            return kind, candidate, reason
+
         if not exact_learning_block and best.code_hit and best.dimension_penalty == 0 and best_exact_score >= 78 and best.overlap >= 0.30:
-            return "exact", best, "совпал код/марка"
+            return finalize("exact", best, "совпал код/марка")
         for candidate in candidates:
             policy_exact_reason = self._exact_reason_by_policy(order, candidate)
             if policy_exact_reason:
-                return "exact", candidate, policy_exact_reason
+                return finalize("exact", candidate, policy_exact_reason)
         if not exact_learning_block and is_exact_pipe_candidate(order, best) and best_exact_score >= 84:
-            return "exact", best, "совпали тип трубы, размер и ГОСТ"
+            return finalize("exact", best, "совпали тип трубы, размер и ГОСТ")
         if not exact_learning_block and generic_exact_allowed and best_exact_score >= 90 and best.overlap >= 0.55 and best.dimension_penalty == 0 and gap >= 4:
-            return "exact", best, "высокая уверенность"
+            return finalize("exact", best, "высокая уверенность")
         if not exact_learning_block and generic_exact_allowed and "tripledn" in best.matched_dimension_keys and best.dimension_penalty == 0 and best_exact_score >= 60 and gap >= 5:
-            return "exact", best, "совпали тип изделия и тройные размеры"
+            return finalize("exact", best, "совпали тип изделия и тройные размеры")
         if not exact_learning_block and generic_exact_allowed and best_exact_score >= 82 and best.overlap >= 0.65 and best.dimension_bonus >= 10 and gap >= 5:
-            return "exact", best, "совпали ключевые слова и размеры"
+            return finalize("exact", best, "совпали ключевые слова и размеры")
         policy_analog_reason = self._analog_reason_by_policy(order, best)
         if policy_analog_reason:
-            return "analog", best, policy_analog_reason
+            return finalize("analog", best, policy_analog_reason)
         if best.score >= 72:
-            return "analog", best, "нужна ручная проверка"
+            return finalize("analog", best, "нужна ручная проверка")
         # High word overlap without dimension info (e.g. "Вентиль запорный" → "Клапан (Вентиль) запорный")
         if best.score >= 60 and best.overlap >= 0.55 and best.dimension_penalty == 0:
-            return "analog", best, "высокое пересечение ключевых слов, нужна ручная проверка"
+            return finalize("analog", best, "высокое пересечение ключевых слов, нужна ручная проверка")
         if best.dimension_penalty == 0 and best.dimension_bonus >= 30 and best.score >= 58:
-            return "analog", best, "сильное совпадение по исполнению и размерам, нужна ручная проверка"
+            return finalize("analog", best, "сильное совпадение по исполнению и размерам, нужна ручная проверка")
         if best.dimension_penalty == 0 and best.dimension_bonus >= 18 and best.score >= 50 and best.overlap >= 0.45:
-            return "analog", best, "совпадают ключевые слова и размеры, нужна ручная проверка"
+            return finalize("analog", best, "совпадают ключевые слова и размеры, нужна ручная проверка")
         if best.dimension_bonus >= 18 and best.score >= 52 and (best.overlap >= 0.35 or best.soft_overlap >= 0.45):
-            return "analog", best, "совпадают тип изделия и размеры, нужна ручная проверка"
+            return finalize("analog", best, "совпадают тип изделия и размеры, нужна ручная проверка")
         # Relaxed threshold for strong dimension matches with no conflicts
         if best.dimension_penalty == 0 and best.dimension_bonus >= 18 and best.score >= 55 and (best.overlap >= 0.15 or best.soft_overlap >= 0.30):
-            return "analog", best, "совпадают размеры и тип, нужна ручная проверка"
+            return finalize("analog", best, "совпадают размеры и тип, нужна ручная проверка")
         if best.dimension_bonus >= 10 and best.score >= 58 and (best.overlap >= 0.20 or best.soft_overlap >= 0.35):
-            return "analog", best, "совпадают размеры, нужна ручная проверка"
+            return finalize("analog", best, "совпадают размеры, нужна ручная проверка")
         if best.code_hit and best.score >= 58:
-            return "analog", best, "совпал код/марка, нужна ручная проверка"
+            return finalize("analog", best, "совпал код/марка, нужна ручная проверка")
         # Catch near-miss items with strong dimension match
         if best.dimension_penalty == 0 and best.dimension_bonus >= 16 and best.score >= 42 and best.overlap >= 0.20:
-            return "analog", best, "размеры совпадают, но низкое пересечение текста, нужна ручная проверка"
-        return "not_found", best, "подходящего совпадения нет"
+            return finalize("analog", best, "размеры совпадают, но низкое пересечение текста, нужна ручная проверка")
+        return finalize("not_found", best, "подходящего совпадения нет")
 
 
 def determine_analog_status(
@@ -4439,6 +4501,9 @@ def match_orders(
             or best is None
             or best.score < 68.0
         )
+        trace = matcher._get_match_trace(line)
+        if trace is not None:
+            trace.fallback_used = needs_exhaustive
         if needs_exhaustive:
             exhaustive_candidates = matcher.find_candidates_exhaustive(line, limit=5)
             exhaustive_kind, exhaustive_best, exhaustive_reason = matcher.classify(line, exhaustive_candidates)
@@ -4455,6 +4520,9 @@ def match_orders(
                 match_kind = exhaustive_kind
                 best = exhaustive_best
                 reason = exhaustive_reason
+                trace = matcher._get_match_trace(line)
+                if trace is not None:
+                    trace.fallback_replaced = True
         if match_kind == "exact" and best is not None:
             available_qty = min(line.requested_qty, best.stock.remaining)
             if available_qty > 0:
@@ -4466,6 +4534,9 @@ def match_orders(
                 else:
                     status = STATUS_FOUND_PARTIAL
                     comment = f"{reason}; на остатке меньше, чем запрошено"
+                trace = matcher._get_match_trace(line)
+                if trace is not None:
+                    trace.final_status = status
                 results.append(
                     MatchResult(
                         order=line,
@@ -4489,6 +4560,9 @@ def match_orders(
                     analogs=matcher.filter_analog_candidates(candidates[1:4]),
                 )
             )
+            trace = matcher._get_match_trace(line)
+            if trace is not None:
+                trace.final_status = STATUS_STOCK_DEPLETED
             continue
         if match_kind == "analog" and best is not None:
             analog_status = determine_analog_status(
@@ -4499,6 +4573,9 @@ def match_orders(
             analog_candidates = matcher.filter_analog_candidates(candidates[:4])
             if not analog_candidates:
                 analog_candidates = [best]
+            trace = matcher._get_match_trace(line)
+            if trace is not None:
+                trace.final_status = analog_status
             results.append(
                 MatchResult(
                     order=line,
@@ -4532,6 +4609,9 @@ def match_orders(
                 reason = "нужна ручная классификация: позиция слишком неоднозначна"
         elif line.classification and line.classification.status == ClassificationStatus.UNCLASSIFIED and not filtered_analogs:
             reason = "классификатор не распознал категорию: нужна ручная проверка строки"
+        trace = matcher._get_match_trace(line)
+        if trace is not None:
+            trace.final_status = STATUS_NOT_FOUND
         results.append(
             MatchResult(
                 order=line,
