@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 from fastapi import UploadFile
+from openpyxl import Workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT / "scripts"
@@ -468,14 +469,19 @@ class MatchingApiHelpersTest(unittest.TestCase):
             old_ek = stock_dir / "остатки_old.xlsm"
             new_ek = stock_dir / "остатки_new.xlsm"
             santeh = stock_dir / "santeh_base.xlsm"
+            standard = stock_dir / "report_standard.xlsx"
             labels = stock_dir / "stock_labels.json"
 
-            for path in (old_ek, new_ek, santeh):
+            for path in (old_ek, new_ek, santeh, standard):
                 path.write_bytes(b"test")
             os.utime(old_ek, (1_700_000_000, 1_700_000_000))
             os.utime(new_ek, (1_800_000_000, 1_800_000_000))
             os.utime(santeh, (1_750_000_000, 1_750_000_000))
-            labels.write_text('{"santeh_base.xlsm": "Сантехкомплект"}', encoding="utf-8")
+            os.utime(standard, (1_760_000_000, 1_760_000_000))
+            labels.write_text(
+                '{"santeh_base.xlsm": "Сантехкомплект", "report_standard.xlsx": "СантехСтандарт"}',
+                encoding="utf-8",
+            )
 
             matching_api_module.STOCK_DIR = stock_dir
             try:
@@ -483,11 +489,32 @@ class MatchingApiHelpersTest(unittest.TestCase):
             finally:
                 matching_api_module.STOCK_DIR = original_stock_dir
 
-        self.assertEqual(len(result), 2)
+        self.assertEqual(len(result), 3)
         self.assertEqual(result[0][0].name, "остатки_new.xlsm")
         self.assertEqual(result[0][1], "ЭК")
         self.assertEqual(result[1][0].name, "santeh_base.xlsm")
         self.assertEqual(result[1][1], "Сантехкомплект")
+        self.assertEqual(result[2][0].name, "report_standard.xlsx")
+        self.assertEqual(result[2][1], "СантехСтандарт")
+
+    def test_load_stock_accepts_santehstandard_workbook_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workbook_path = Path(tmp_dir) / "standard.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Лист_1"
+            ws.append(["Артикул", "Номенклатура", "Единица измерения", "Свободный остаток", "Цена клиента со скидкой"])
+            ws.append(["00159", "Уголок L16х16", "шт", 2550, 139.64])
+            wb.save(workbook_path)
+
+            items = matching_api_module.load_stock(workbook_path, source_label="СантехСтандарт")
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].code_1c, "00159")
+        self.assertEqual(items[0].name, "Уголок L16х16")
+        self.assertEqual(items[0].quantity, 2550.0)
+        self.assertEqual(items[0].sale_price, "139.64")
+        self.assertEqual(items[0].source_label, "СантехСтандарт")
 
     def test_update_row_quantity_inplace_rejects_over_available_stock(self) -> None:
         row = {

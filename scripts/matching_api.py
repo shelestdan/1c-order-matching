@@ -411,7 +411,7 @@ def _find_all_stock_files() -> list[tuple[Path, str]]:
 
     def label_sort_key(item: tuple[Path, str]) -> tuple[int, str]:
         _, label = item
-        priority = {"ЭК": 0, "Сантехкомплект": 1}
+        priority = {"ЭК": 0, "Сантехкомплект": 1, "СантехСтандарт": 2}
         return (priority.get(label, 9), item[0].name.lower())
 
     labels_path = STOCK_DIR / STOCK_LABELS_FILE
