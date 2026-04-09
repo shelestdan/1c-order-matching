@@ -13,6 +13,8 @@ let searchResultsByRow = {}; // row_id -> manual search results
 let selectionInFlightRows = new Set();
 let qtyUpdateInFlightRows = new Set();
 let analyticsData = null;
+let activeJobPollId = '';
+const JOB_POLL_INTERVAL_MS = 2500;
 
 /* ===== Init ===== */
 document.addEventListener('DOMContentLoaded', () => {
@@ -86,6 +88,7 @@ function showApp() {
 }
 
 function showUpload() {
+  activeJobPollId = '';
   document.getElementById('upload-section').style.display = '';
   document.getElementById('progress-section').style.display = 'none';
   document.getElementById('results-section').style.display = 'none';
@@ -111,6 +114,7 @@ function showAnalytics() {
 }
 
 function logout() {
+  activeJobPollId = '';
   token = '';
   currentUser = null;
   localStorage.removeItem('auth_token');
@@ -175,18 +179,66 @@ async function apiFetch(path, method = 'GET', body = null) {
   return data;
 }
 
+function isJobProcessing(data) {
+  return !!data && data.job_status === 'processing';
+}
+
+function isJobError(data) {
+  return !!data && data.job_status === 'error';
+}
+
+function showProgress(message, detail = '') {
+  document.getElementById('upload-section').style.display = 'none';
+  document.getElementById('results-section').style.display = 'none';
+  document.getElementById('history-section').style.display = 'none';
+  document.getElementById('analytics-section').style.display = 'none';
+  document.getElementById('progress-section').style.display = '';
+  document.getElementById('progress-text').textContent = message;
+  document.getElementById('progress-detail').textContent = detail;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForJobCompletion(jobId, detail = '') {
+  activeJobPollId = jobId;
+  while (activeJobPollId === jobId) {
+    const data = await apiFetch(`/api/jobs/${jobId}`);
+    currentJob = { ...data, job_id: jobId };
+    if (isJobProcessing(data)) {
+      showProgress(data.progress_message || 'Обработка файла...', detail || data.filename || '');
+      await delay(JOB_POLL_INTERVAL_MS);
+      continue;
+    }
+    if (isJobError(data)) {
+      activeJobPollId = '';
+      throw new Error(data.error_message || 'Ошибка обработки');
+    }
+    allRows = data.rows || [];
+    pendingApprovals = {};
+    searchResultsByRow = {};
+    activeJobPollId = '';
+    renderResults(currentJob);
+    return data;
+  }
+  throw new Error('Ожидание обработки прервано');
+}
+
 /* ===== File upload ===== */
 async function handleFile(file) {
-  document.getElementById('upload-section').style.display = 'none';
-  document.getElementById('progress-section').style.display = '';
-  document.getElementById('progress-text').textContent = 'Обработка файла...';
-  document.getElementById('progress-detail').textContent = file.name;
+  showProgress('Загрузка файла...', file.name);
 
   try {
     const fd = new FormData();
     fd.append('file', file);
     const data = await apiFetch('/api/upload', 'POST', fd);
-    currentJob = data;
+    currentJob = { ...data, job_id: data.job_id };
+    if (isJobProcessing(data)) {
+      showProgress(data.progress_message || 'Обработка файла...', file.name);
+      await waitForJobCompletion(data.job_id, file.name);
+      return;
+    }
     allRows = data.rows || [];
     pendingApprovals = {};
     searchResultsByRow = {};
@@ -217,6 +269,10 @@ async function handleTextInput() {
 
 /* ===== Results ===== */
 function renderResults(data) {
+  if (isJobProcessing(data)) {
+    showProgress(data.progress_message || 'Обработка файла...', data.filename || '');
+    return;
+  }
   document.getElementById('progress-section').style.display = 'none';
   document.getElementById('results-section').style.display = '';
   const alertBox = document.getElementById('results-alert');
@@ -838,14 +894,18 @@ async function loadHistory() {
 }
 
 async function openHistoryJob(jobId) {
-  document.getElementById('history-section').style.display = 'none';
-  document.getElementById('progress-section').style.display = '';
-  document.getElementById('progress-text').textContent = 'Загрузка результатов...';
-  document.getElementById('progress-detail').textContent = '';
+  showProgress('Загрузка результатов...', '');
 
   try {
     const data = await apiFetch(`/api/jobs/${jobId}`);
     currentJob = { ...data, job_id: jobId };
+    if (isJobProcessing(data)) {
+      await waitForJobCompletion(jobId, data.filename || '');
+      return;
+    }
+    if (isJobError(data)) {
+      throw new Error(data.error_message || 'Ошибка обработки');
+    }
     allRows = data.rows || [];
     pendingApprovals = {};
     renderResults(data);

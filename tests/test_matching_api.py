@@ -571,30 +571,25 @@ class MatchingApiSimpleRequestFlowTest(unittest.TestCase):
         me_payload = me(None, token=payload.token)
         self.assertEqual(me_payload.username, "anisovets")
 
-    def test_upload_file_runs_pipeline_in_threadpool_on_cache_miss(self) -> None:
+    def test_upload_file_returns_processing_job_and_starts_background_thread(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             original_jobs_dir = matching_api_module.JOBS_DIR
             original_check_auth = matching_api_module._check_auth
             original_cache_key = matching_api_module._pipeline_cache_key
-            original_run_pipeline = matching_api_module._run_pipeline
-            original_run_in_threadpool = matching_api_module.run_in_threadpool
+            original_thread = matching_api_module.threading.Thread
             original_save_job = matching_api_module._save_job
             original_jobs = matching_api_module._jobs
             original_cache = matching_api_module._pipeline_result_cache
 
-            called = {"threadpool": False, "pipeline": False}
+            called = {"started": False, "target": None, "args": None}
 
-            async def fake_run_in_threadpool(fn, *args, **kwargs):
-                called["threadpool"] = True
-                return fn(*args, **kwargs)
+            class FakeThread:
+                def __init__(self, target=None, args=(), daemon=None, name=None):
+                    called["target"] = target
+                    called["args"] = args
 
-            def fake_run_pipeline(upload_path, job_dir):
-                called["pipeline"] = True
-                return {
-                    "total_rows": 1,
-                    "status_counts": {"Найдено полностью": 1},
-                    "rows": [],
-                }
+                def start(self):
+                    called["started"] = True
 
             matching_api_module.JOBS_DIR = Path(tmp_dir)
             matching_api_module._check_auth = lambda authorization, token=None: AuthUser(
@@ -603,8 +598,7 @@ class MatchingApiSimpleRequestFlowTest(unittest.TestCase):
                 role="manager",
             )
             matching_api_module._pipeline_cache_key = lambda upload_path: "cache-key"
-            matching_api_module._run_pipeline = fake_run_pipeline
-            matching_api_module.run_in_threadpool = fake_run_in_threadpool
+            matching_api_module.threading.Thread = FakeThread
             matching_api_module._save_job = lambda job_id, data: None
             matching_api_module._jobs = {}
             matching_api_module._pipeline_result_cache = {"scope": None, "entries": {}}
@@ -616,15 +610,16 @@ class MatchingApiSimpleRequestFlowTest(unittest.TestCase):
                 matching_api_module.JOBS_DIR = original_jobs_dir
                 matching_api_module._check_auth = original_check_auth
                 matching_api_module._pipeline_cache_key = original_cache_key
-                matching_api_module._run_pipeline = original_run_pipeline
-                matching_api_module.run_in_threadpool = original_run_in_threadpool
+                matching_api_module.threading.Thread = original_thread
                 matching_api_module._save_job = original_save_job
                 matching_api_module._jobs = original_jobs
                 matching_api_module._pipeline_result_cache = original_cache
 
-        self.assertTrue(called["threadpool"])
-        self.assertTrue(called["pipeline"])
-        self.assertEqual(result["total_rows"], 1)
+        self.assertTrue(called["started"])
+        self.assertIs(called["target"], matching_api_module._process_uploaded_job)
+        self.assertEqual(result["job_status"], "processing")
+        self.assertEqual(result["filename"], "order.xlsx")
+        self.assertEqual(result["rows"], [])
 
 
 if __name__ == "__main__":

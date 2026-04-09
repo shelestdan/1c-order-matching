@@ -21,6 +21,7 @@ import re
 import secrets
 import shutil
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -28,7 +29,6 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, Header, Query, Request, UploadFile
-from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -1305,6 +1305,10 @@ def _run_pipeline(upload_path: Path, job_dir: Path) -> dict[str, Any]:
 # In-memory job index (job_id -> metadata)
 _jobs: dict[str, dict[str, Any]] = {}
 
+JOB_STATUS_PROCESSING = "processing"
+JOB_STATUS_COMPLETED = "completed"
+JOB_STATUS_ERROR = "error"
+
 
 def _load_job(job_id: str) -> dict[str, Any]:
     job_dir = JOBS_DIR / job_id
@@ -1318,6 +1322,56 @@ def _save_job(job_id: str, data: dict[str, Any]) -> None:
     job_dir = JOBS_DIR / job_id
     result_path = job_dir / "result.json"
     result_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _build_processing_job_data(job_id: str, filename: str, user: AuthUser, created_at: float) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "filename": filename,
+        "created_at": created_at,
+        "created_by": user.username,
+        "created_by_display": user.display_name,
+        "created_by_role": user.role,
+        "saved_at": None,
+        "saved_by": "",
+        "saved_by_display": "",
+        "learning_saved_count": 0,
+        "export_count": 0,
+        "job_status": JOB_STATUS_PROCESSING,
+        "progress_message": "Обработка файла...",
+        "error_message": "",
+        "total_rows": 0,
+        "status_counts": {},
+        "rows": [],
+        "stock_files": [],
+        "parsed_count": 0,
+        "issue_count": 0,
+        "output_files": [],
+    }
+
+
+def _finalize_job_data(base_data: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    finalized = copy.deepcopy(result)
+    finalized["job_id"] = base_data["job_id"]
+    finalized["filename"] = base_data["filename"]
+    finalized["created_at"] = base_data["created_at"]
+    finalized["created_by"] = base_data["created_by"]
+    finalized["created_by_display"] = base_data["created_by_display"]
+    finalized["created_by_role"] = base_data["created_by_role"]
+    finalized["saved_at"] = base_data.get("saved_at")
+    finalized["saved_by"] = base_data.get("saved_by", "")
+    finalized["saved_by_display"] = base_data.get("saved_by_display", "")
+    finalized["learning_saved_count"] = int(base_data.get("learning_saved_count", 0) or 0)
+    finalized["export_count"] = int(base_data.get("export_count", 0) or 0)
+    finalized["job_status"] = JOB_STATUS_COMPLETED
+    finalized["progress_message"] = ""
+    finalized["error_message"] = ""
+    return finalized
+
+
+def _store_job_state(job_id: str, data: dict[str, Any]) -> None:
+    _save_job(job_id, data)
+    _jobs[job_id] = _build_job_summary(job_id, data, float(data.get("created_at") or time.time()))
 
 
 def _build_job_summary(job_id: str, data: dict[str, Any], created_at: float) -> dict[str, Any]:
@@ -1336,6 +1390,9 @@ def _build_job_summary(job_id: str, data: dict[str, Any], created_at: float) -> 
         "replacements_count": replacements_count,
         "learning_saved_count": int(data.get("learning_saved_count", 0) or 0),
         "export_count": int(data.get("export_count", 0) or 0),
+        "job_status": data.get("job_status") or JOB_STATUS_COMPLETED,
+        "progress_message": data.get("progress_message") or "",
+        "error_message": data.get("error_message") or "",
     }
 
 
@@ -1733,6 +1790,29 @@ def _record_manual_selection_learning(
 # ---------------------------------------------------------------------------
 
 
+def _process_uploaded_job(
+    job_id: str,
+    upload_path: Path,
+    job_dir: Path,
+    base_data: dict[str, Any],
+    cache_key: str,
+) -> None:
+    try:
+        cached_result = _pipeline_result_cache["entries"].get(cache_key)
+        if cached_result is not None:
+            result = copy.deepcopy(cached_result)
+        else:
+            result = _run_pipeline(upload_path, job_dir)
+            _pipeline_result_cache["entries"][cache_key] = copy.deepcopy(result)
+        _store_job_state(job_id, _finalize_job_data(base_data, result))
+    except Exception as exc:
+        error_data = copy.deepcopy(base_data)
+        error_data["job_status"] = JOB_STATUS_ERROR
+        error_data["progress_message"] = "Ошибка обработки"
+        error_data["error_message"] = str(exc)
+        _store_job_state(job_id, error_data)
+
+
 @app.post("/api/upload")
 async def upload_file(
     file: UploadFile = File(...),
@@ -1740,7 +1820,7 @@ async def upload_file(
     token: str | None = Query(None),
 ):
     user = _check_auth(authorization, token)
-
+    created_at = time.time()
     job_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
     job_dir = ensure_output_dir(JOBS_DIR / job_id)
 
@@ -1750,45 +1830,18 @@ async def upload_file(
         shutil.copyfileobj(file.file, f)
 
     cache_key = _pipeline_cache_key(upload_path)
-    cached_result = _pipeline_result_cache["entries"].get(cache_key)
-    if cached_result is not None:
-        result = copy.deepcopy(cached_result)
-    else:
-        try:
-            result = await run_in_threadpool(_run_pipeline, upload_path, job_dir)
-        except Exception as exc:
-            raise HTTPException(500, f"Pipeline error: {exc}")
-        _pipeline_result_cache["entries"][cache_key] = copy.deepcopy(result)
+    base_data = _build_processing_job_data(job_id, file.filename, user, created_at)
+    _store_job_state(job_id, base_data)
 
-    _jobs[job_id] = {
-        "job_id": job_id,
-        "filename": file.filename,
-        "created_at": time.time(),
-        "total_rows": result["total_rows"],
-        "status_counts": result["status_counts"],
-        "created_by": user.username,
-        "created_by_display": user.display_name,
-        "saved_at": None,
-        "saved_by": "",
-        "saved_by_display": "",
-        "replacements_count": 0,
-        "learning_saved_count": 0,
-        "export_count": 0,
-    }
-    result["job_id"] = job_id
-    result["filename"] = file.filename
-    result["created_at"] = _jobs[job_id]["created_at"]
-    result["created_by"] = user.username
-    result["created_by_display"] = user.display_name
-    result["created_by_role"] = user.role
-    result["saved_at"] = None
-    result["saved_by"] = ""
-    result["saved_by_display"] = ""
-    result["learning_saved_count"] = 0
-    result["export_count"] = 0
-    _save_job(job_id, result)
+    worker = threading.Thread(
+        target=_process_uploaded_job,
+        args=(job_id, upload_path, job_dir, copy.deepcopy(base_data), cache_key),
+        daemon=True,
+        name=f"upload-job-{job_id}",
+    )
+    worker.start()
 
-    return {"job_id": job_id, "filename": file.filename, **result}
+    return copy.deepcopy(base_data)
 
 
 @app.get("/api/jobs")
