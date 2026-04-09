@@ -17,6 +17,7 @@ import hashlib
 import json
 import math
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -126,6 +127,11 @@ _manual_search_cache: dict[str, Any] = {
 }
 
 _learning_store: LearningStore | None = None
+_job_queue: "queue.Queue[tuple[str, Path, Path, dict[str, Any], str]]" = queue.Queue()
+_job_worker_thread: threading.Thread | None = None
+_job_queue_state_lock = threading.Lock()
+_queued_job_ids: set[str] = set()
+_active_job_id: str | None = None
 
 # ---------------------------------------------------------------------------
 # App
@@ -144,6 +150,8 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def warm_matcher_cache_on_startup() -> None:
+    _start_job_worker_if_needed()
+    _recover_processing_jobs_on_startup()
     threading.Thread(
         target=_warm_matcher_cache_background,
         daemon=True,
@@ -1363,6 +1371,12 @@ def _build_processing_job_data(job_id: str, filename: str, user: AuthUser, creat
     }
 
 
+def _queued_progress_message(recovered: bool = False) -> str:
+    if recovered:
+        return "Восстанавливаем обработку файла после перезапуска сервиса..."
+    return "Файл загружен. Ожидает очередь на анализ..."
+
+
 def _finalize_job_data(base_data: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     finalized = copy.deepcopy(result)
     finalized["job_id"] = base_data["job_id"]
@@ -1826,6 +1840,96 @@ def _process_uploaded_job(
         _store_job_state(job_id, error_data)
 
 
+def _job_worker_is_busy() -> bool:
+    with _job_queue_state_lock:
+        return _active_job_id is not None or bool(_queued_job_ids)
+
+
+def _enqueue_processing_job(
+    job_id: str,
+    upload_path: Path,
+    job_dir: Path,
+    base_data: dict[str, Any],
+    cache_key: str,
+) -> None:
+    with _job_queue_state_lock:
+        if job_id == _active_job_id or job_id in _queued_job_ids:
+            return
+        _queued_job_ids.add(job_id)
+    _job_queue.put((job_id, upload_path, job_dir, copy.deepcopy(base_data), cache_key))
+
+
+def _job_worker_loop() -> None:
+    global _active_job_id
+    while True:
+        job_id, upload_path, job_dir, base_data, cache_key = _job_queue.get()
+        try:
+            with _job_queue_state_lock:
+                _queued_job_ids.discard(job_id)
+                _active_job_id = job_id
+            processing_data = copy.deepcopy(base_data)
+            processing_data["job_status"] = JOB_STATUS_PROCESSING
+            processing_data["progress_message"] = "Файл загружен. Идёт анализ, это может занять несколько минут..."
+            processing_data["error_message"] = ""
+            _store_job_state(job_id, processing_data)
+            _process_uploaded_job(job_id, upload_path, job_dir, processing_data, cache_key)
+        finally:
+            with _job_queue_state_lock:
+                if _active_job_id == job_id:
+                    _active_job_id = None
+            _job_queue.task_done()
+
+
+def _start_job_worker_if_needed() -> None:
+    global _job_worker_thread
+    with _job_queue_state_lock:
+        if _job_worker_thread is not None and _job_worker_thread.is_alive():
+            return
+        _job_worker_thread = threading.Thread(
+            target=_job_worker_loop,
+            daemon=True,
+            name="upload-job-worker",
+        )
+        _job_worker_thread.start()
+
+
+def _recover_processing_jobs_on_startup() -> None:
+    if not JOBS_DIR.exists():
+        return
+    for job_dir in sorted((path for path in JOBS_DIR.iterdir() if path.is_dir()), key=lambda path: path.name):
+        result_path = job_dir / "result.json"
+        if not result_path.exists():
+            continue
+        try:
+            data = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("job_status") != JOB_STATUS_PROCESSING:
+            continue
+        filename = str(data.get("filename") or "").strip()
+        if not filename:
+            continue
+        upload_path = job_dir / filename
+        if not upload_path.exists():
+            error_data = copy.deepcopy(data)
+            error_data["job_status"] = JOB_STATUS_ERROR
+            error_data["progress_message"] = "Ошибка обработки"
+            error_data["error_message"] = "Файл загрузки не найден для восстановления задачи"
+            _store_job_state(job_dir.name, error_data)
+            continue
+        recovery_data = copy.deepcopy(data)
+        recovery_data["progress_message"] = _queued_progress_message(recovered=True)
+        recovery_data["error_message"] = ""
+        _store_job_state(job_dir.name, recovery_data)
+        _enqueue_processing_job(
+            job_dir.name,
+            upload_path,
+            job_dir,
+            recovery_data,
+            _pipeline_cache_key(upload_path),
+        )
+
+
 def _warm_matcher_cache_background() -> None:
     try:
         _load_cached_matcher()
@@ -1851,15 +1955,11 @@ async def upload_file(
 
     cache_key = _pipeline_cache_key(upload_path)
     base_data = _build_processing_job_data(job_id, file.filename, user, created_at)
+    if _job_worker_is_busy():
+        base_data["progress_message"] = _queued_progress_message()
     _store_job_state(job_id, base_data)
-
-    worker = threading.Thread(
-        target=_process_uploaded_job,
-        args=(job_id, upload_path, job_dir, copy.deepcopy(base_data), cache_key),
-        daemon=True,
-        name=f"upload-job-{job_id}",
-    )
-    worker.start()
+    _start_job_worker_if_needed()
+    _enqueue_processing_job(job_id, upload_path, job_dir, base_data, cache_key)
 
     return copy.deepcopy(base_data)
 

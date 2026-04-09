@@ -571,25 +571,19 @@ class MatchingApiSimpleRequestFlowTest(unittest.TestCase):
         me_payload = me(None, token=payload.token)
         self.assertEqual(me_payload.username, "anisovets")
 
-    def test_upload_file_returns_processing_job_and_starts_background_thread(self) -> None:
+    def test_upload_file_returns_processing_job_and_enqueues_background_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             original_jobs_dir = matching_api_module.JOBS_DIR
             original_check_auth = matching_api_module._check_auth
             original_cache_key = matching_api_module._pipeline_cache_key
-            original_thread = matching_api_module.threading.Thread
+            original_start_worker = matching_api_module._start_job_worker_if_needed
+            original_enqueue = matching_api_module._enqueue_processing_job
+            original_is_busy = matching_api_module._job_worker_is_busy
             original_save_job = matching_api_module._save_job
             original_jobs = matching_api_module._jobs
             original_cache = matching_api_module._pipeline_result_cache
 
-            called = {"started": False, "target": None, "args": None}
-
-            class FakeThread:
-                def __init__(self, target=None, args=(), daemon=None, name=None):
-                    called["target"] = target
-                    called["args"] = args
-
-                def start(self):
-                    called["started"] = True
+            called = {"started": False, "enqueued": None}
 
             matching_api_module.JOBS_DIR = Path(tmp_dir)
             matching_api_module._check_auth = lambda authorization, token=None: AuthUser(
@@ -598,7 +592,20 @@ class MatchingApiSimpleRequestFlowTest(unittest.TestCase):
                 role="manager",
             )
             matching_api_module._pipeline_cache_key = lambda upload_path: "cache-key"
-            matching_api_module.threading.Thread = FakeThread
+            matching_api_module._start_job_worker_if_needed = lambda: called.__setitem__("started", True)
+            matching_api_module._enqueue_processing_job = (
+                lambda job_id, upload_path, job_dir, base_data, cache_key: called.__setitem__(
+                    "enqueued",
+                    {
+                        "job_id": job_id,
+                        "upload_path": upload_path,
+                        "job_dir": job_dir,
+                        "filename": base_data.get("filename"),
+                        "cache_key": cache_key,
+                    },
+                )
+            )
+            matching_api_module._job_worker_is_busy = lambda: False
             matching_api_module._save_job = lambda job_id, data: None
             matching_api_module._jobs = {}
             matching_api_module._pipeline_result_cache = {"scope": None, "entries": {}}
@@ -610,13 +617,17 @@ class MatchingApiSimpleRequestFlowTest(unittest.TestCase):
                 matching_api_module.JOBS_DIR = original_jobs_dir
                 matching_api_module._check_auth = original_check_auth
                 matching_api_module._pipeline_cache_key = original_cache_key
-                matching_api_module.threading.Thread = original_thread
+                matching_api_module._start_job_worker_if_needed = original_start_worker
+                matching_api_module._enqueue_processing_job = original_enqueue
+                matching_api_module._job_worker_is_busy = original_is_busy
                 matching_api_module._save_job = original_save_job
                 matching_api_module._jobs = original_jobs
                 matching_api_module._pipeline_result_cache = original_cache
 
         self.assertTrue(called["started"])
-        self.assertIs(called["target"], matching_api_module._process_uploaded_job)
+        self.assertIsNotNone(called["enqueued"])
+        self.assertEqual(called["enqueued"]["filename"], "order.xlsx")
+        self.assertEqual(called["enqueued"]["cache_key"], "cache-key")
         self.assertEqual(result["job_status"], "processing")
         self.assertEqual(result["filename"], "order.xlsx")
         self.assertEqual(result["rows"], [])
