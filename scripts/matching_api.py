@@ -105,6 +105,7 @@ _stock_cache: dict[str, Any] = {
     "base_stock": None,
     "stock_paths": [],
 }
+_stock_cache_lock = threading.Lock()
 
 # Master StockMatcher (read-only indexes) — forked per job so index building
 # happens only once per stock file version, not once per job.
@@ -112,6 +113,7 @@ _matcher_cache: dict[str, Any] = {
     "fingerprint": None,
     "master_matcher": None,
 }
+_matcher_cache_lock = threading.Lock()
 
 _pipeline_result_cache: dict[str, Any] = {
     "scope": None,
@@ -138,6 +140,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def warm_matcher_cache_on_startup() -> None:
+    threading.Thread(
+        target=_warm_matcher_cache_background,
+        daemon=True,
+        name="matcher-cache-warmup",
+    ).start()
 
 # ---------------------------------------------------------------------------
 # Auth helpers
@@ -775,24 +786,25 @@ def _manual_search_cache_key(row: dict[str, Any], query: str, limit: int) -> str
 
 
 def _load_cached_stock() -> tuple[list[Path], list[Any]]:
-    stock_files = _find_all_stock_files()
-    fp = _stock_fingerprint(stock_files)
-    if _stock_cache["fingerprint"] == fp and _stock_cache["base_stock"] is not None:
-        return _stock_cache["stock_paths"], _stock_cache["base_stock"]
+    with _stock_cache_lock:
+        stock_files = _find_all_stock_files()
+        fp = _stock_fingerprint(stock_files)
+        if _stock_cache["fingerprint"] == fp and _stock_cache["base_stock"] is not None:
+            return _stock_cache["stock_paths"], _stock_cache["base_stock"]
 
-    all_items: list[Any] = []
-    paths: list[Path] = []
-    for path, label in stock_files:
-        items = load_stock(path, source_label=label)
-        all_items.extend(items)
-        paths.append(path)
+        all_items: list[Any] = []
+        paths: list[Path] = []
+        for path, label in stock_files:
+            items = load_stock(path, source_label=label)
+            all_items.extend(items)
+            paths.append(path)
 
-    _stock_cache["fingerprint"] = fp
-    _stock_cache["base_stock"] = all_items
-    _stock_cache["stock_paths"] = paths
-    # Invalidate matcher cache when stock changes
-    _matcher_cache["master_matcher"] = None
-    return paths, all_items
+        _stock_cache["fingerprint"] = fp
+        _stock_cache["base_stock"] = all_items
+        _stock_cache["stock_paths"] = paths
+        # Invalidate matcher cache when stock changes
+        _matcher_cache["master_matcher"] = None
+        return paths, all_items
 
 
 def _load_cached_matcher() -> "StockMatcher":
@@ -801,27 +813,28 @@ def _load_cached_matcher() -> "StockMatcher":
     Callers must call .fork() on the result to get a job-local copy with
     independent remaining-quantity tracking.
     """
-    stock_files = _find_all_stock_files()
-    _get_learning_store()
-    manual_memory_path = _manual_selection_memory_path()
-    fp = f"{_stock_fingerprint(stock_files)}|manual:{_path_fingerprint(manual_memory_path)}"
-    if _matcher_cache["fingerprint"] == fp and _matcher_cache["master_matcher"] is not None:
-        return _matcher_cache["master_matcher"]
+    with _matcher_cache_lock:
+        stock_files = _find_all_stock_files()
+        _get_learning_store()
+        manual_memory_path = _manual_selection_memory_path()
+        fp = f"{_stock_fingerprint(stock_files)}|manual:{_path_fingerprint(manual_memory_path)}"
+        if _matcher_cache["fingerprint"] == fp and _matcher_cache["master_matcher"] is not None:
+            return _matcher_cache["master_matcher"]
 
-    _, base_stock = _load_cached_stock()
-    reviewed_decisions = load_reviewed_analog_decisions(DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH)
-    manual_selection_memory = load_manual_selection_memory(manual_memory_path)
-    substitution_policy = load_substitution_policy()
-    stock_items = clone_stock_items(base_stock)
-    master = StockMatcher(
-        stock_items,
-        reviewed_analog_decisions=reviewed_decisions,
-        manual_selection_memory=manual_selection_memory,
-        substitution_policy=substitution_policy,
-    )
-    _matcher_cache["fingerprint"] = fp
-    _matcher_cache["master_matcher"] = master
-    return master
+        _, base_stock = _load_cached_stock()
+        reviewed_decisions = load_reviewed_analog_decisions(DEFAULT_REVIEWED_ANALOG_DECISIONS_PATH)
+        manual_selection_memory = load_manual_selection_memory(manual_memory_path)
+        substitution_policy = load_substitution_policy()
+        stock_items = clone_stock_items(base_stock)
+        master = StockMatcher(
+            stock_items,
+            reviewed_analog_decisions=reviewed_decisions,
+            manual_selection_memory=manual_selection_memory,
+            substitution_policy=substitution_policy,
+        )
+        _matcher_cache["fingerprint"] = fp
+        _matcher_cache["master_matcher"] = master
+        return master
 
 
 def _rebuild_status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -1338,7 +1351,7 @@ def _build_processing_job_data(job_id: str, filename: str, user: AuthUser, creat
         "learning_saved_count": 0,
         "export_count": 0,
         "job_status": JOB_STATUS_PROCESSING,
-        "progress_message": "Обработка файла...",
+        "progress_message": "Файл загружен. Идёт анализ, это может занять несколько минут...",
         "error_message": "",
         "total_rows": 0,
         "status_counts": {},
@@ -1811,6 +1824,13 @@ def _process_uploaded_job(
         error_data["progress_message"] = "Ошибка обработки"
         error_data["error_message"] = str(exc)
         _store_job_state(job_id, error_data)
+
+
+def _warm_matcher_cache_background() -> None:
+    try:
+        _load_cached_matcher()
+    except Exception:
+        pass
 
 
 @app.post("/api/upload")
