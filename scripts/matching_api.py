@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import math
 import os
 import queue
@@ -25,6 +26,8 @@ import tempfile
 import threading
 import time
 import uuid
+
+logger = logging.getLogger(__name__)
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1934,7 +1937,7 @@ def _warm_matcher_cache_background() -> None:
     try:
         _load_cached_matcher()
     except Exception:
-        pass
+        logger.exception("Warm-up failed: could not load matcher cache")
 
 
 @app.post("/api/upload")

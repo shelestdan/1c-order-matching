@@ -702,7 +702,12 @@ class StockItem:
     root_tokens: set[str]
     code_tokens: set[str]
     dimension_tags: set[str]
+    expanded_dimensions: dict[str, set[str]] = field(default_factory=dict)
     source_label: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.expanded_dimensions:
+            self.expanded_dimensions = expand_dimension_values(group_dimension_tags(self.dimension_tags))
 
 
 @dataclass
@@ -725,8 +730,13 @@ class OrderLine:
     root_tokens: set[str]
     code_tokens: set[str]
     dimension_tags: set[str]
-    raw_query: str
+    expanded_dimensions: dict[str, set[str]] = field(default_factory=dict)
+    raw_query: str = ""
     classification: QueryClassification | None = None
+
+    def __post_init__(self) -> None:
+        if not self.expanded_dimensions:
+            self.expanded_dimensions = expand_dimension_values(group_dimension_tags(self.dimension_tags))
 
 
 @dataclass
@@ -1904,27 +1914,34 @@ def extract_code_tokens(*parts: object) -> set[str]:
     return tokens
 
 
+_NORM_DU_RE = re.compile(r"\b(?:ду|dу|dн)\.?\s*(?=\d)")
+_NORM_PU_RE = re.compile(r"\b(?:ру|rу)\.?\s*(?=\d)")
+_NORM_WS_RE = re.compile(r"\s+")
+
+
 def normalize_measure_text(*parts: object) -> str:
     text = normalize_symbols(" ".join(clean_text(part) for part in parts if clean_text(part)))
     text = " ".join(fix_mixed_script_token(token) for token in TOKEN_RE.findall(text))
     text = text.lower().replace("ё", "е")
-    text = re.sub(r"\b(?:ду|dу|dн)\.?\s*(?=\d)", "dn ", text)
-    text = re.sub(r"\b(?:ру|rу)\.?\s*(?=\d)", "pn ", text)
+    text = _NORM_DU_RE.sub("dn ", text)
+    text = _NORM_PU_RE.sub("pn ", text)
     text = text.replace("мм", "mm")
-    text = re.sub(r"\s+", " ", text)
+    text = _NORM_WS_RE.sub(" ", text)
     return text
 
 
 def normalize_fraction(value: str) -> str:
-    return re.sub(r"\s+", "", value.replace(",", "."))
+    return _NORM_WS_RE.sub("", value.replace(",", "."))
+
+
+_INCH_VALUE_RE = re.compile(
+    r"(?<![0-9/])(?:r|g)?\s*([0-9]+\s+[0-9]+/[0-9]+|[0-9]+/[0-9]+|[0-9]+)"
+    r"(?=\s*(?:\"|''|'|inch|дюйм))"
+)
 
 
 def iter_explicit_inch_values(text: str) -> Iterable[str]:
-    pattern = re.compile(
-        r"(?<![0-9/])(?:r|g)?\s*([0-9]+\s+[0-9]+/[0-9]+|[0-9]+/[0-9]+|[0-9]+)"
-        r"(?=\s*(?:\"|''|'|inch|дюйм))"
-    )
-    for match in pattern.findall(text):
+    for match in _INCH_VALUE_RE.findall(text):
         normalized = normalize_fraction(match)
         if normalized in INCH_TO_DN:
             yield normalized
@@ -1953,6 +1970,85 @@ def strip_elbow_angle_series_prefix(text: str) -> str:
     return _ELBOW_ANGLE_SERIES_PREFIX_RE.sub("", text)
 
 
+# ── pre-compiled patterns for extract_dimension_tags ─────────────────────────
+_DIM_RE_GRADE_SIZE = re.compile(
+    r"\b(?:0[38]|12)\d?\s*[xхh]\s*\d{2}\s*[hn]\s*\d{2}(?:\s*[tm]\s*\d?)?\b"
+)
+_DIM_RE_DN_TEXT = re.compile(r"\bdn(?:\.|-)?\s*([0-9]+(?:[.,][0-9]+)?)")
+_DIM_RE_DN_COMPACT = re.compile(r"\bdn([0-9]{2,4})(?![0-9])")
+_DIM_RE_DU_DY = re.compile(r"\b(?:du|dy|ду|дн)\s*([0-9]+(?:[.,][0-9]+)?)\b")
+_DIM_RE_DN_CYR_COMPACT = re.compile(r"\b(?:dn|дн)([0-9]{2,4})(?![0-9])")
+_DIM_RE_D_PREFIX = re.compile(r"\bd(?!n)(?!u)(?!y)\s*([0-9]+(?:[.,][0-9]+)?)\b")
+_DIM_RE_DIAM_SYMBOL = re.compile(r"[⌀ø∅]\s*([0-9]+(?:[.,][0-9]+)?)")
+_DIM_RE_PN = re.compile(r"\b(?:pn|ru)(?:\.|-)?\s*([0-9]+(?:[.,][0-9]+)?)")
+_DIM_RE_KVS = re.compile(r"\bkvs\s*=?\s*([0-9]+(?:[.,][0-9]+)?)")
+_DIM_RE_LMME = re.compile(r"\bl\.?\s*=?\s*([0-9]+(?:[.,][0-9]+)?)\s*mm")
+_DIM_RE_LMM_NOEQ = re.compile(r"\bl\s*=\s*([0-9]+(?:[.,][0-9]+)?)(?!\s*mm)(?=\s|$)")
+_DIM_RE_MM_UNIT = re.compile(r"(?<![.,])([0-9]+(?:[.,][0-9]+)?)\s*(?:mm|мм)\b")
+_DIM_RE_L_PREFIX_CHECK = re.compile(r"(?:\bl\s*=?\s*|\bl=)$")
+_DIM_RE_DEG1 = re.compile(r"\b(15|30|45|60|87(?:[.,]5)?|90|120|180)\s*(?:deg|gr|гр|град|grad|-)")
+_DIM_RE_DEG2 = re.compile(
+    r"(?:[xх/]|-)\s*(15|30|45|60|87(?:[.,]5)?|90|120|180)\s*(?:deg|gr|гр|град|grad)\b"
+)
+_DIM_RE_ELBOW_ANGLE = re.compile(
+    r"\b(?:ugolnik|ugol|otvod|koleno)\b[^0-9]{0,6}(15|30|45|60|87(?:[.,]5)?|90|120|180)\b"
+)
+_DIM_RE_DN_DEG_COMBINED = re.compile(
+    r"\b(?:dn|du|dy|ду|дн)(?:\.|-)?\s*(\d{2,4})\s*/\s*(15|30|45|60|87(?:[.,]5)?|90|120|180)\b"
+)
+_DIM_RE_OD_WALL_X = re.compile(
+    r"(?<![a-zа-я0-9])(\d{1,4}(?:[.,]\d+)?)\s*[xхh]\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9/])"
+)
+_DIM_RE_OD_WALL_DASH = re.compile(
+    r"(?<![a-zа-я0-9])(\d{1,4}(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9])"
+)
+_DIM_RE_VGP = re.compile(r"\b(?:vgp|vodogazoprovod|3262)\b")
+_DIM_RE_MAT = re.compile(r"\b(?:st|ct|ст)\.?\s*([0-9][0-9a-z]*)\b")
+_DIM_RE_GOST = re.compile(r"\b(?:gost|гост)\s*([0-9]{5})\b")
+_DIM_RE_ANGLE_SERIES = re.compile(
+    r"\b(15|30|45|60|87(?:[.,]5)?|90|120|180)\s*-\s*([12])\s*-\s*\d{2,4}\s*[xхh]"
+)
+_DIM_RE_FLANGE_TYPE = re.compile(r"\b(?:tip|type|тип)\s*(01|11)\b")
+_DIM_RE_FLANGE_DN_PN_TYPE = re.compile(r"\b(\d{2,4})\s*-\s*(\d{2,4})\s*-\s*(01|11)\b")
+_DIM_RE_FLANGE_DN_PN_TYPE_EXEC = re.compile(
+    r"\b(\d{2,4})\s*-\s*(\d{2,4})\s*-\s*(01|11)\s*-\s*([12])\b"
+)
+_DIM_RE_FLANGE_PN_TYPE_EXEC_FACE = re.compile(
+    r"\b(\d{2,4})\s*-\s*(01|11)\s*-\s*([12])\s*-\s*([a-zа-я])\b"
+)
+_DIM_RE_8_HOLES = re.compile(r"\b8\s+otverst")
+_DIM_RE_TEE_SEARCH = re.compile(r"\b(?:troinik|tee)\b")
+_DIM_RE_TEE_4 = re.compile(
+    r"(?<![a-zа-я0-9])(\d{2,4})\s*[xх]\s*(\d{2,4})\s*[xх]\s*(\d{2,4})\s*[xх]\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9])"
+)
+_DIM_RE_TEE_3 = re.compile(r"\b(?:dn|d)?\s*(\d{2,4})\s*[xх/]\s*(\d{2,4})\s*[xх/]\s*(\d{2,4})\b")
+_DIM_RE_TEE_PAIR = re.compile(r"\b(?:dn|d)?\s*(\d{2,4})\s*(?:[xх/]|-)\s*(\d{2,4})\b")
+_DIM_RE_RAVN = re.compile(r"\b(?:ravn|ravnoproh|equal)\b")
+_DIM_RE_RAVN_CYR = re.compile(r"\bравн")
+_DIM_RE_PEREH_SEARCH = re.compile(r"\bpereh(?:od\w*)?\b")
+_DIM_RE_PEREH_3 = re.compile(
+    r"(?<![a-zа-я0-9])(\d{2,4})\s*[xх]\s*(\d{2,4})\s*[xх]\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9/])"
+)
+_DIM_RE_PEREH_PAIR = re.compile(r"\b(?:dn|d)?\s*(\d{2,4})\s*(?:[xх/]|-)\s*(\d{2,4})\b")
+_DIM_RE_PEREH_COMPLEX = re.compile(
+    r"\b(\d{2,4}(?:[.,]\d+)?)\s*[xхh]\s*\d+(?:[.,]\d+)?\s*[-/]\s*"
+    r"(\d{2,4}(?:[.,]\d+)?)\s*[xхh]\s*\d+(?:[.,]\d+)?\b"
+)
+_DIM_RE_DIAM_INCH = re.compile(
+    r"\b(\d{2,4})\s*[xхh]\s*r?\s*([0-9]+\s+[0-9]+/[0-9]+|[0-9]+/[0-9]+|[0-9]+)\s*(?:\"|''|'|inch|дюйм)"
+)
+_DIM_RE_VALVE_KW = re.compile(
+    r"\b(?:kran|klapan|filtr|rezba|vozduhootvod|vozdnhootvod|zatvor|zadvizh)\b"
+)
+_DIM_RE_VALVE_DN_SUFFIX = re.compile(r"\b[a-z0-9./]+-(15|20|25|32|40|50|65|80|100|125|150)\b")
+_DIM_RE_CYR_FITTING = re.compile(
+    r"\b(?:отвод|колено|муфта|тройник|заглушка|переход|фланец|кран|клапан|затвор|фильтр|труба)\b"
+)
+_DIM_RE_END_DN = re.compile(r"(?:^|\s)(\d{2,4})(?:\s*mm|\s*мм)?$")
+_DIM_RE_TUBE_ELBOW = re.compile(r"\b(?:truba|отвод|колено)\b")
+_DIM_RE_NUMERIC_TOKEN = re.compile(r"^\d{2,4}(?:\.\d+)?$")
+
+
 def extract_dimension_tags(*parts: object) -> set[str]:
     raw_text = normalize_symbols(" ".join(clean_text(part) for part in parts if clean_text(part))).lower()
     text = normalize_measure_text(*parts)
@@ -1960,44 +2056,40 @@ def extract_dimension_tags(*parts: object) -> set[str]:
     family_tags = extract_family_tags(*parts)
     families = extract_tag_values(family_tags, "family:")
     has_elbow_compound_geometry = "elbow" in families and bool(_ELBOW_ANGLE_SERIES_PREFIX_RE.search(text))
-    text_without_grade_sizes = re.sub(
-        r"\b(?:0[38]|12)\d?\s*[xхh]\s*\d{2}\s*[hn]\s*\d{2}(?:\s*[tm]\s*\d?)?\b",
-        " ",
-        text,
-    )
+    text_without_grade_sizes = _DIM_RE_GRADE_SIZE.sub(" ", text)
     generic_size_text = strip_elbow_angle_series_prefix(text_without_grade_sizes) if has_elbow_compound_geometry else text_without_grade_sizes
     tags: set[str] = set()
-    for match in re.findall(r"\bdn(?:\.|-)?\s*([0-9]+(?:[.,][0-9]+)?)", text):
+    for match in _DIM_RE_DN_TEXT.findall(text):
         tags.add(f"dn:{match.replace(',', '.')}")
-    for match in re.findall(r"\bdn(?:\.|-)?\s*([0-9]+(?:[.,][0-9]+)?)", search_text):
+    for match in _DIM_RE_DN_TEXT.findall(search_text):
         tags.add(f"dn:{match.replace(',', '.')}")
-    for match in re.findall(r"\bdn([0-9]{2,4})(?![0-9])", search_text):
+    for match in _DIM_RE_DN_COMPACT.findall(search_text):
         tags.add(f"dn:{normalize_measure_value(match)}")
-    for match in re.findall(r"\b(?:du|dy|ду|дн)\s*([0-9]+(?:[.,][0-9]+)?)\b", raw_text):
+    for match in _DIM_RE_DU_DY.findall(raw_text):
         tags.add(f"dn:{match.replace(',', '.')}")
-    for match in re.findall(r"\b(?:dn|дн)([0-9]{2,4})(?![0-9])", raw_text):
+    for match in _DIM_RE_DN_CYR_COMPACT.findall(raw_text):
         tags.add(f"dn:{normalize_measure_value(match)}")
-    for match in re.findall(r"\bd(?!n)(?!u)(?!y)\s*([0-9]+(?:[.,][0-9]+)?)\b", text):
+    for match in _DIM_RE_D_PREFIX.findall(text):
         normalized = match.replace(",", ".")
         tags.add(f"dn:{normalized}")
         if "." not in normalized:
             tags.add(f"od:{normalized}")
-    for match in re.findall(r"[⌀ø∅]\s*([0-9]+(?:[.,][0-9]+)?)", raw_text):
+    for match in _DIM_RE_DIAM_SYMBOL.findall(raw_text):
         normalized = normalize_measure_value(match)
         tags.add(f"dn:{normalized}")
         tags.add(f"od:{normalized}")
-    for match in re.findall(r"\b(?:pn|ru)(?:\.|-)?\s*([0-9]+(?:[.,][0-9]+)?)", text):
+    for match in _DIM_RE_PN.findall(text):
         tags.add(f"pn:{match.replace(',', '.')}")
-    for match in re.findall(r"\bkvs\s*=?\s*([0-9]+(?:[.,][0-9]+)?)", text):
+    for match in _DIM_RE_KVS.findall(text):
         tags.add(f"kvs:{match.replace(',', '.')}")
-    for match in re.findall(r"\bl\.?\s*=?\s*([0-9]+(?:[.,][0-9]+)?)\s*mm", text):
+    for match in _DIM_RE_LMME.findall(text):
         tags.add(f"lmm:{match.replace(',', '.')}")
     # Capture L=NNN without explicit mm unit (common in valve specs like КШЦП)
-    for match in re.findall(r"\bl\s*=\s*([0-9]+(?:[.,][0-9]+)?)(?!\s*mm)(?=\s|$)", text):
+    for match in _DIM_RE_LMM_NOEQ.findall(text):
         tags.add(f"lmm:{match.replace(',', '.')}")
-    for match in re.finditer(r"(?<![.,])([0-9]+(?:[.,][0-9]+)?)\s*(?:mm|мм)\b", text):
+    for match in _DIM_RE_MM_UNIT.finditer(text):
         prefix = text[max(0, match.start() - 6) : match.start()]
-        if re.search(r"(?:\bl\s*=?\s*|\bl=)$", prefix):
+        if _DIM_RE_L_PREFIX_CHECK.search(prefix):
             continue
         normalized = match.group(1).replace(",", ".")
         try:
@@ -2009,82 +2101,61 @@ def extract_dimension_tags(*parts: object) -> set[str]:
         tags.add(f"od:{normalized}")
     for inch_value in iter_explicit_inch_values(raw_text):
         tags.add(f'inch:{inch_value}')
-    for match in re.findall(r"\b(15|30|45|60|87(?:[.,]5)?|90|120|180)\s*(?:deg|gr|гр|град|grad|-)", text):
+    for match in _DIM_RE_DEG1.findall(text):
         add_degree_tag(tags, match)
-    for match in re.findall(r"(?:[xх/]|-)\s*(15|30|45|60|87(?:[.,]5)?|90|120|180)\s*(?:deg|gr|гр|град|grad)\b", text):
+    for match in _DIM_RE_DEG2.findall(text):
         add_degree_tag(tags, match)
     if "elbow" in families:
-        elbow_angle_match = re.search(
-            r"\b(?:ugolnik|ugol|otvod|koleno)\b[^0-9]{0,6}(15|30|45|60|87(?:[.,]5)?|90|120|180)\b",
-            search_text,
-        )
+        elbow_angle_match = _DIM_RE_ELBOW_ANGLE.search(search_text)
         if elbow_angle_match:
             add_degree_tag(tags, elbow_angle_match.group(1))
-    for dn_value, deg_value in re.findall(
-        r"\b(?:dn|du|dy|ду|дн)(?:\.|-)?\s*(\d{2,4})\s*/\s*(15|30|45|60|87(?:[.,]5)?|90|120|180)\b",
-        raw_text,
-    ):
+    for dn_value, deg_value in _DIM_RE_DN_DEG_COMBINED.findall(raw_text):
         tags.add(f"dn:{dn_value}")
         add_degree_tag(tags, deg_value)
-    for outer, wall in re.findall(
-        r"(?<![a-zа-я0-9])(\d{1,4}(?:[.,]\d+)?)\s*[xхh]\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9/])",
-        generic_size_text,
-    ):
+    for outer, wall in _DIM_RE_OD_WALL_X.findall(generic_size_text):
         normalized_outer = outer.replace(",", ".")
         normalized_wall = wall.replace(",", ".")
         if float(normalized_wall) > 12.0:
             continue
         tags.add(f"od:{normalized_outer}")
         tags.add(f"wall:{normalized_wall}")
-    for outer, wall in re.findall(
-        r"(?<![a-zа-я0-9])(\d{1,4}(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9])",
-        generic_size_text,
-    ):
+    for outer, wall in _DIM_RE_OD_WALL_DASH.findall(generic_size_text):
         normalized_outer = outer.replace(",", ".")
         normalized_wall = wall.replace(",", ".")
         if float(normalized_wall) > 12.0:
             continue
         tags.add(f"od:{normalized_outer}")
         tags.add(f"wall:{normalized_wall}")
-        if re.search(r"\b(?:vgp|vodogazoprovod|3262)\b", search_text):
+        if _DIM_RE_VGP.search(search_text):
             tags.add(f"dn:{normalized_outer}")
-    for match in re.findall(r"\b(?:st|ct|ст)\.?\s*([0-9][0-9a-z]*)\b", text):
+    for match in _DIM_RE_MAT.findall(text):
         tags.add(f"mat:{match}")
-    for match in re.findall(r"\b(?:gost|гост)\s*([0-9]{5})\b", text):
+    for match in _DIM_RE_GOST.findall(text):
         tags.add(f"spec:{match}")
-    for match in re.findall(r"\b(15|30|45|60|87(?:[.,]5)?|90|120|180)\s*-\s*([12])\s*-\s*\d{2,4}\s*[xхh]", text):
+    for match in _DIM_RE_ANGLE_SERIES.findall(text):
         add_degree_tag(tags, match[0])
         tags.add(f"series:{match[1]}")
-    for flange_type in re.findall(r"\b(?:tip|type|тип)\s*(01|11)\b", text):
+    for flange_type in _DIM_RE_FLANGE_TYPE.findall(text):
         tags.add(f"type:{flange_type}")
-    for dn, pn, flange_type in re.findall(r"\b(\d{2,4})\s*-\s*(\d{2,4})\s*-\s*(01|11)\b", text):
+    for dn, pn, flange_type in _DIM_RE_FLANGE_DN_PN_TYPE.findall(text):
         tags.add(f"dn:{dn}")
         tags.add(f"pn:{pn}")
         tags.add(f"type:{flange_type}")
-    for dn, pn, flange_type, execution in re.findall(
-        r"\b(\d{2,4})\s*-\s*(\d{2,4})\s*-\s*(01|11)\s*-\s*([12])\b",
-        text,
-    ):
+    for dn, pn, flange_type, execution in _DIM_RE_FLANGE_DN_PN_TYPE_EXEC.findall(text):
         tags.add(f"dn:{dn}")
         tags.add(f"pn:{pn}")
         tags.add(f"type:{flange_type}")
         tags.add(f"exec:{execution}")
-    for pn, flange_type, execution, face in re.findall(
-        r"\b(\d{2,4})\s*-\s*(01|11)\s*-\s*([12])\s*-\s*([a-zа-я])\b",
-        text,
-    ):
+    for pn, flange_type, execution, face in _DIM_RE_FLANGE_PN_TYPE_EXEC_FACE.findall(text):
         tags.add(f"pn:{pn}")
         tags.add(f"type:{flange_type}")
         tags.add(f"exec:{execution}")
         tags.add(f"face:{normalize_flange_face(transliterate_token(face))}")
-    if re.search(r"\b8\s+otverst", text):
+    if _DIM_RE_8_HOLES.search(text):
         tags.add("hole:8")
-    if re.search(r"\b(?:troinik|tee)\b", search_text):
+    if _DIM_RE_TEE_SEARCH.search(search_text):
         # NxNxNxN pattern: DN1 x DN2 x DN3 x wall (compact order format)
-        for first, second, third, wall in re.findall(
-            r"(?<![a-zа-я0-9])(\d{2,4})\s*[xх]\s*(\d{2,4})\s*[xх]\s*(\d{2,4})\s*[xх]\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9])",
-            text,
-        ):
+        for first, second, third, wall in _DIM_RE_TEE_4.findall(text):
             wall_f = float(wall.replace(",", "."))
             if wall_f <= 12.0:
                 normalized_values = [normalize_measure_value(first), normalize_measure_value(second), normalize_measure_value(third)]
@@ -2093,18 +2164,12 @@ def extract_dimension_tags(*parts: object) -> set[str]:
                 tags.add(f"tripledn:{normalize_multi_measure_tag(*normalized_values)}")
                 tags.add(f"wall:{normalize_measure_value(wall)}")
         # NxNxN pattern: DN1 x DN2 x DN3 (no wall)
-        for first, second, third in re.findall(
-            r"\b(?:dn|d)?\s*(\d{2,4})\s*[xх/]\s*(\d{2,4})\s*[xх/]\s*(\d{2,4})\b",
-            search_text,
-        ):
+        for first, second, third in _DIM_RE_TEE_3.findall(search_text):
             normalized_values = [normalize_measure_value(first), normalize_measure_value(second), normalize_measure_value(third)]
             for value in normalized_values:
                 tags.add(f"dn:{value}")
             tags.add(f"tripledn:{normalize_multi_measure_tag(*normalized_values)}")
-        for left, right in re.findall(
-            r"\b(?:dn|d)?\s*(\d{2,4})\s*(?:[xх/]|-)\s*(\d{2,4})\b",
-            search_text,
-        ):
+        for left, right in _DIM_RE_TEE_PAIR.findall(search_text):
             normalized_left = normalize_measure_value(left)
             normalized_right = normalize_measure_value(right)
             tags.add(f"dn:{normalized_left}")
@@ -2115,19 +2180,16 @@ def extract_dimension_tags(*parts: object) -> set[str]:
             od_values = extract_tag_values(tags, "od:")
             dn_values = extract_tag_values(tags, "dn:")
             # Equal tee: single OD (or "равн"/equal keyword) → all 3 ports same
-            is_equal = re.search(r"\b(?:ravn|ravnoproh|equal)\b", search_text) or re.search(r"\bравн", raw_text)
+            is_equal = _DIM_RE_RAVN.search(search_text) or _DIM_RE_RAVN_CYR.search(raw_text)
             if is_equal:
                 for v in od_values:
                     tags.add(f"tripledn:{normalize_multi_measure_tag(v, v, v)}")
                 if not od_values:
                     for v in dn_values:
                         tags.add(f"tripledn:{normalize_multi_measure_tag(v, v, v)}")
-    if re.search(r"\bpereh(?:od\w*)?\b", search_text):
+    if _DIM_RE_PEREH_SEARCH.search(search_text):
         # Compact order format: NxNxN where last is wall (e.g. "40x32x3.5 mm")
-        for dn1, dn2, wall in re.findall(
-            r"(?<![a-zа-я0-9])(\d{2,4})\s*[xх]\s*(\d{2,4})\s*[xх]\s*(\d+(?:[.,]\d+)?)(?![a-zа-я0-9/])",
-            text,
-        ):
+        for dn1, dn2, wall in _DIM_RE_PEREH_3.findall(text):
             wall_f = float(wall.replace(",", "."))
             if wall_f <= 12.0:
                 n_left = normalize_measure_value(dn1)
@@ -2138,46 +2200,36 @@ def extract_dimension_tags(*parts: object) -> set[str]:
                 tags.add(f"od:{n_right}")
                 tags.add(f"wall:{normalize_measure_value(wall)}")
                 tags.add(f"pairdn:{normalize_pair_tag(n_left, n_right)}")
-        for left, right in re.findall(
-            r"\b(?:dn|d)?\s*(\d{2,4})\s*(?:[xх/]|-)\s*(\d{2,4})\b",
-            search_text,
-        ):
+        for left, right in _DIM_RE_PEREH_PAIR.findall(search_text):
             normalized_left = normalize_measure_value(left)
             normalized_right = normalize_measure_value(right)
             tags.add(f"dn:{normalized_left}")
             tags.add(f"dn:{normalized_right}")
             tags.add(f"pairdn:{normalize_pair_tag(normalized_left, normalized_right)}")
-        for left, right in re.findall(
-            r"\b(\d{2,4}(?:[.,]\d+)?)\s*[xхh]\s*\d+(?:[.,]\d+)?\s*[-/]\s*"
-            r"(\d{2,4}(?:[.,]\d+)?)\s*[xхh]\s*\d+(?:[.,]\d+)?\b",
-            text_without_grade_sizes,
-        ):
+        for left, right in _DIM_RE_PEREH_COMPLEX.findall(text_without_grade_sizes):
             normalized_left = normalize_measure_value(left)
             normalized_right = normalize_measure_value(right)
             tags.add(f"dn:{normalized_left}")
             tags.add(f"dn:{normalized_right}")
             tags.add(f"pairdn:{normalize_pair_tag(normalized_left, normalized_right)}")
-    for diameter, inch_value in re.findall(
-        r"\b(\d{2,4})\s*[xхh]\s*r?\s*([0-9]+\s+[0-9]+/[0-9]+|[0-9]+/[0-9]+|[0-9]+)\s*(?:\"|''|'|inch|дюйм)",
-        raw_text,
-    ):
+    for diameter, inch_value in _DIM_RE_DIAM_INCH.findall(raw_text):
         tags.add(f"dn:{normalize_measure_value(diameter)}")
         normalized_inch = normalize_fraction(inch_value)
         if normalized_inch in INCH_TO_DN:
             tags.add(f"inch:{normalized_inch}")
-    if re.search(r"\b(?:kran|klapan|filtr|rezba|vozduhootvod|vozdnhootvod|zatvor|zadvizh)\b", search_text):
-        for match in re.findall(r"\b[a-z0-9./]+-(15|20|25|32|40|50|65|80|100|125|150)\b", search_text):
+    if _DIM_RE_VALVE_KW.search(search_text):
+        for match in _DIM_RE_VALVE_DN_SUFFIX.findall(search_text):
             tags.add(f"dn:{match}")
-    if re.search(r"\b(?:отвод|колено|муфта|тройник|заглушка|переход|фланец|кран|клапан|затвор|фильтр|труба)\b", text):
-        for match in re.findall(r"(?:^|\s)(\d{2,4})(?:\s*mm|\s*мм)?$", text):
+    if _DIM_RE_CYR_FITTING.search(text):
+        for match in _DIM_RE_END_DN.findall(text):
             tags.add(f"dn:{match}")
-            if re.search(r"\b(?:truba|отвод|колено)\b", search_text):
+            if _DIM_RE_TUBE_ELBOW.search(search_text):
                 tags.add(f"od:{match}")
     degree_values = {normalize_degree_value(value) for value in extract_tag_values(tags, "deg:")}
     numeric_tokens: list[str] = []
     for token in search_text.split():
         cleaned = token.strip(".,;:()[]{}")
-        if re.fullmatch(r"\d{2,4}(?:\.\d+)?", cleaned):
+        if _DIM_RE_NUMERIC_TOKEN.fullmatch(cleaned):
             numeric_tokens.append(normalize_measure_value(cleaned))
     if "dn:" not in "".join(tags) and numeric_tokens and not has_elbow_compound_geometry:
         size_candidates = [
@@ -2391,8 +2443,8 @@ def candidate_matches_policy_dimensions(order: OrderLine, candidate: Candidate, 
         return False
     order_family = primary_family_tag(order.dimension_tags)
     stock_family = primary_family_tag(candidate.stock.dimension_tags)
-    order_dimensions = expand_dimension_values(group_dimension_tags(order.dimension_tags))
-    stock_dimensions = expand_dimension_values(group_dimension_tags(candidate.stock.dimension_tags))
+    order_dimensions = order.expanded_dimensions
+    stock_dimensions = candidate.stock.expanded_dimensions
     for key in required_keys:
         if key == "family":
             if not order_family or not stock_family or order_family != stock_family:
@@ -2578,8 +2630,8 @@ def family_ranking_profile_bonus(order: OrderLine, stock: StockItem) -> tuple[fl
     if not profile:
         return 0.0, []
 
-    order_dimensions = expand_dimension_values(group_dimension_tags(order.dimension_tags))
-    stock_dimensions = expand_dimension_values(group_dimension_tags(stock.dimension_tags))
+    order_dimensions = order.expanded_dimensions
+    stock_dimensions = stock.expanded_dimensions
     bonus = 0.0
     reasons: list[str] = []
     partial_bonus, partial_reasons, conflict_scale = _family_partial_dimension_bonus(
@@ -2741,6 +2793,7 @@ def load_stock(stock_path: Path, source_label: str = "") -> list[StockItem]:
                     row.get("ТипПродукта"),
                 ),
                 dimension_tags=dimension_tags,
+                expanded_dimensions=expand_dimension_values(group_dimension_tags(dimension_tags)),
                 source_label=source_label,
             )
         )
@@ -3229,6 +3282,7 @@ def load_order_lines(order_path: Path) -> list[OrderLine]:
                     root_tokens=extract_root_tokens(search_tokens),
                     code_tokens=extract_code_tokens(*query_parts),
                     dimension_tags=dimension_tags,
+                    expanded_dimensions=expand_dimension_values(group_dimension_tags(dimension_tags)),
                     raw_query=raw_query,
                     classification=classification,
                 )
@@ -3320,8 +3374,7 @@ class StockMatcher:
             for structure_key in structure_keys:
                 structure_index[structure_key].append(index)
 
-            expanded_dimensions = expand_dimension_values(group_dimension_tags(item.dimension_tags))
-            for key, values in expanded_dimensions.items():
+            for key, values in item.expanded_dimensions.items():
                 if not values:
                     continue
                 dimension_group_index[key].append(index)
@@ -3743,8 +3796,8 @@ class StockMatcher:
         return bool(order_grades & stock_grades)
 
     def _has_required_dimension_matches(self, order: OrderLine, stock: StockItem) -> bool:
-        order_dimensions = expand_dimension_values(group_dimension_tags(order.dimension_tags))
-        stock_dimensions = expand_dimension_values(group_dimension_tags(stock.dimension_tags))
+        order_dimensions = order.expanded_dimensions
+        stock_dimensions = stock.expanded_dimensions
 
         order_families = extract_tag_values(order.dimension_tags, "family:")
         stock_families = extract_tag_values(stock.dimension_tags, "family:")
@@ -3911,8 +3964,8 @@ class StockMatcher:
         if size_pair_hit:
             reasons.append("совпадает размерный шаблон")
 
-        order_dimensions = expand_dimension_values(group_dimension_tags(order.dimension_tags))
-        stock_dimensions = expand_dimension_values(group_dimension_tags(stock.dimension_tags))
+        order_dimensions = order.expanded_dimensions
+        stock_dimensions = stock.expanded_dimensions
         dimension_bonus = 0.0
         dimension_penalty = 0.0
         matched_dimension_keys: list[str] = []
@@ -4098,7 +4151,7 @@ class StockMatcher:
 
         dimension_bonus = np.zeros(stock_count, dtype=np.float64)
         dimension_penalty = np.zeros(stock_count, dtype=np.float64)
-        order_dimensions = expand_dimension_values(group_dimension_tags(order.dimension_tags))
+        order_dimensions = order.expanded_dimensions
         for key, order_values in iter_scored_dimensions(order_dimensions):
             group_matches = self.dimension_group_index.get(key, [])
             if not group_matches:
@@ -4213,8 +4266,8 @@ class StockMatcher:
         reasons: list[str] = []
         matched_dimension_keys: list[str] = []
         conflicting_dimension_keys: list[str] = []
-        order_dimensions = expand_dimension_values(group_dimension_tags(order.dimension_tags))
-        stock_dimensions = expand_dimension_values(group_dimension_tags(stock.dimension_tags))
+        order_dimensions = order.expanded_dimensions
+        stock_dimensions = stock.expanded_dimensions
         if code_hits[stock_index]:
             reasons.append("совпадает код/марка")
         for key, order_values in iter_scored_dimensions(order_dimensions):

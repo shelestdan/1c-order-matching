@@ -83,6 +83,50 @@ UNIT_NORMALIZATION = {
 }
 COMMENT_KEYWORDS = ("срочно", "аналог", "замена", "доставка", "обязательно", "желательно")
 NON_ITEM_HINTS = ("добрый", "здравствуйте", "нужны", "нужен", "интересует", "прошу", "спасибо", "добрый день")
+
+# Pre-compiled patterns for qty extraction (built once, reused on every call)
+_QTY_PATTERNS: tuple[tuple[re.Pattern[str], float], ...] = (
+    (
+        re.compile(
+            rf"^(?P<body>.+?)\s+(?:кол(?:-?во|ичество)?|qty)\s*[:=]?\s*(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{UNIT_PATTERN})?\s*$",
+            re.IGNORECASE,
+        ),
+        0.95,
+    ),
+    (
+        re.compile(
+            rf"^(?P<body>.+?)\s+(?P<unit>{UNIT_PATTERN})\s*[:.]?\s*(?P<qty>\d+(?:[.,]\d+)?)\s*$",
+            re.IGNORECASE,
+        ),
+        0.93,
+    ),
+    (
+        re.compile(
+            rf"^(?P<body>.+?)\s*(?:[-–—,:;]\s*)?(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{UNIT_PATTERN})\s*$",
+            re.IGNORECASE,
+        ),
+        0.92,
+    ),
+    (re.compile(r"^(?P<body>.+?)\s*[xх*]\s*(?P<qty>\d+(?:[.,]\d+)?)\s*$", re.IGNORECASE), 0.84),
+    (
+        re.compile(
+            rf"^(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{UNIT_PATTERN})\s+(?P<body>.+)$",
+            re.IGNORECASE,
+        ),
+        0.80,
+    ),
+)
+
+_STRIP_QTY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        rf"^(?P<body>.+?)\s+(?P<unit>{UNIT_PATTERN})\s*[:.]?\s*(?P<qty>\d+(?:[.,]\d+)?)\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"^(?P<body>.+?)\s+(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{UNIT_PATTERN})\s*$",
+        re.IGNORECASE,
+    ),
+)
 LEADING_REQUEST_PREFIXES = (
     "нужно ",
     "нужна ",
@@ -164,18 +208,8 @@ def strip_inline_quantity_suffix(text: str, expected_qty: float, expected_unit: 
     cleaned = clean_text(text)
     if not cleaned:
         return ""
-    patterns = [
-        re.compile(
-            rf"^(?P<body>.+?)\s+(?P<unit>{UNIT_PATTERN})\s*[:.]?\s*(?P<qty>\d+(?:[.,]\d+)?)\s*$",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            rf"^(?P<body>.+?)\s+(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{UNIT_PATTERN})\s*$",
-            re.IGNORECASE,
-        ),
-    ]
     normalized_expected_unit = normalize_unit(expected_unit)
-    for pattern in patterns:
+    for pattern in _STRIP_QTY_PATTERNS:
         match = pattern.match(cleaned)
         if not match:
             continue
@@ -339,27 +373,7 @@ def extract_mark(text: str) -> str:
 
 
 def extract_qty_from_text(text: str) -> tuple[str, float, str, float] | None:
-    patterns = [
-        re.compile(
-            rf"^(?P<body>.+?)\s+(?:кол(?:-?во|ичество)?|qty)\s*[:=]?\s*(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{UNIT_PATTERN})?\s*$",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            rf"^(?P<body>.+?)\s+(?P<unit>{UNIT_PATTERN})\s*[:.]?\s*(?P<qty>\d+(?:[.,]\d+)?)\s*$",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            rf"^(?P<body>.+?)\s*(?:[-–—,:;]\s*)?(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{UNIT_PATTERN})\s*$",
-            re.IGNORECASE,
-        ),
-        re.compile(r"^(?P<body>.+?)\s*[xх*]\s*(?P<qty>\d+(?:[.,]\d+)?)\s*$", re.IGNORECASE),
-        re.compile(
-            rf"^(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{UNIT_PATTERN})\s+(?P<body>.+)$",
-            re.IGNORECASE,
-        ),
-    ]
-    scores = (0.95, 0.93, 0.92, 0.84, 0.8)
-    for pattern, confidence in zip(patterns, scores):
+    for pattern, confidence in _QTY_PATTERNS:
         match = pattern.match(text.strip())
         if not match:
             continue
