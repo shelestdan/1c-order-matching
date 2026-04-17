@@ -945,11 +945,25 @@ function analyticsSummaryCard(label, value, accent = '') {
 
 function renderAnalytics(data) {
   const summary = data.summary || {};
+  const feedbackBySource = summary.feedback_by_source || {};
+  const learningStore = data.learning_store || {};
+  const learningStoreStatus = learningStore.persistent ? 'постоянная' : 'не настроена';
+  const learningStoreWarning = learningStore.warning
+    ? `<div class="analytics-warning">${esc(learningStore.warning)}</div>`
+    : '';
   document.getElementById('analytics-summary').innerHTML = [
     analyticsSummaryCard('Сохранённых файлов', summary.saved_files || 0, 'is-primary'),
     analyticsSummaryCard('Пользователей с выгрузками', summary.users_with_exports || 0),
     analyticsSummaryCard('Всего замен', summary.replacement_count || 0),
     analyticsSummaryCard('Обучающих замен', summary.learned_replacement_count || 0),
+    analyticsSummaryCard('Записей памяти', summary.feedback_entry_count || 0),
+    analyticsSummaryCard('Выбрано менеджером', summary.positive_feedback_count || 0),
+    analyticsSummaryCard('Отклонено менеджером', summary.negative_feedback_count || 0),
+    analyticsSummaryCard('Память БД', learningStoreStatus),
+    analyticsSummaryCard('Manual search', feedbackBySource.manual_search || 0),
+    analyticsSummaryCard('Analog approve', feedbackBySource.analog || 0),
+    analyticsSummaryCard('Низкая уверенность', summary.low_confidence_feedback_count || 0),
+    learningStoreWarning,
   ].join('');
 
   const usersContainer = document.getElementById('analytics-users');

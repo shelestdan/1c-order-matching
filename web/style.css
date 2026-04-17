@@ -624,7 +624,7 @@ tr.row-notfound td:first-child { border-left: 3px solid var(--notfound); }
 /* ===== Analytics ===== */
 .analytics-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 12px;
   margin: 16px 0 20px;
 }
@@ -654,6 +654,16 @@ tr.row-notfound td:first-child { border-left: 3px solid var(--notfound); }
 .analytics-card-label {
   font-size: 13px;
   color: var(--text-muted);
+}
+
+.analytics-warning {
+  grid-column: 1 / -1;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  color: #92400e;
+  font-size: 13px;
 }
 
 .analytics-layout {

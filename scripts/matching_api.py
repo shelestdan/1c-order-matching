@@ -50,6 +50,7 @@ from process_1c_orders import (
     StockMatcher,
     SUBSTITUTION_POLICY_PATH,
     augment_search_text_with_dimension_tags,
+    build_learning_structure_profile,
     build_search_text,
     build_structural_query_keys,
     clone_stock_items,
@@ -214,6 +215,23 @@ def _learning_db_path() -> Path:
         if _is_db_path(candidate):
             return candidate
     return DEFAULT_LEARNING_DB_PATH
+
+
+def _learning_store_status(store: LearningStore | None = None) -> dict[str, Any]:
+    path = (store.path if store is not None else _learning_db_path()).expanduser().resolve()
+    railway_env = any(os.environ.get(name) for name in ("RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID", "RAILWAY_ENVIRONMENT"))
+    persistent_configured = bool(os.environ.get("LEARNING_DB_PATH") or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH"))
+    persistent = persistent_configured or (not railway_env and path.exists())
+    warning = ""
+    if railway_env and not persistent_configured:
+        warning = "LEARNING_DB_PATH/RAILWAY_VOLUME_MOUNT_PATH не задан: память может потеряться при redeploy"
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "size_bytes": path.stat().st_size if path.exists() else 0,
+        "persistent": persistent,
+        "warning": warning,
+    }
 
 
 def _legacy_manual_selection_path() -> Path:
@@ -519,6 +537,19 @@ def _normalize_feedback_candidate(candidate: dict[str, Any]) -> dict[str, Any] |
     return payload
 
 
+def _learning_confidence_for_selection(selected_via: str, dimension_tags: list[str], key_tokens: list[str]) -> float:
+    selected_via = str(selected_via or "").strip()
+    if selected_via == "manual_search":
+        return 1.0
+    if selected_via == "analog":
+        return 0.95
+    if selected_via == "manager_final_file":
+        return 0.90
+    if dimension_tags or len(key_tokens) >= 2:
+        return 0.85
+    return 0.60
+
+
 def _merge_candidate_pool(*candidate_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_code: dict[str, dict[str, Any]] = {}
     for candidates in candidate_groups:
@@ -601,6 +632,7 @@ def _build_feedback_snapshot_entries(
             dimension_tags=dimension_tags,
         )
     )
+    structure_profile = build_learning_structure_profile(dimension_tags)
     clean_search_query = search_query.strip()
     snapshot_id = _snapshot_id(job_id, row)
     normalized_approved = _normalize_feedback_candidate(approved_candidate)
@@ -622,6 +654,8 @@ def _build_feedback_snapshot_entries(
         "query": query,
         "query_key": query_key,
         "structure_keys": structure_keys,
+        "structure_profile": structure_profile,
+        "learning_confidence": _learning_confidence_for_selection(selected_via, dimension_tags, key_tokens),
         "order_key_tokens": key_tokens,
         "order_root_tokens": root_tokens,
         "order_dimension_tags": dimension_tags,
@@ -1558,6 +1592,23 @@ def _build_admin_analytics(
         if not snapshot_id or snapshot_id in approved_snapshots:
             continue
         approved_snapshots[snapshot_id] = entry
+    positive_feedback_count = sum(
+        1 for entry in feedback_entries if str(entry.get("decision") or "").strip().lower() == "approved"
+    )
+    negative_feedback_count = sum(
+        1 for entry in feedback_entries if str(entry.get("decision") or "").strip().lower() == "rejected"
+    )
+    feedback_by_source: dict[str, int] = {}
+    low_confidence_feedback_count = 0
+    for entry in feedback_entries:
+        source = str(entry.get("selected_via") or "unknown").strip() or "unknown"
+        feedback_by_source[source] = feedback_by_source.get(source, 0) + 1
+        try:
+            confidence = float(entry.get("learning_confidence", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            confidence = 1.0
+        if confidence < 0.70:
+            low_confidence_feedback_count += 1
     summary = {
         "saved_files": len(exports),
         "unique_jobs": len({entry.get("job_id") for entry in exports if entry.get("job_id")}),
@@ -1570,6 +1621,12 @@ def _build_admin_analytics(
             else sum(int(entry.get("learned_replacement_count", 0) or 0) for entry in exports)
         ),
         "users_with_exports": len({entry.get("saved_by") for entry in exports if entry.get("saved_by")}),
+        "feedback_entry_count": len(feedback_entries),
+        "positive_feedback_count": positive_feedback_count,
+        "negative_feedback_count": negative_feedback_count,
+        "learned_snapshot_count": len(approved_snapshots),
+        "low_confidence_feedback_count": low_confidence_feedback_count,
+        "feedback_by_source": feedback_by_source,
     }
 
     user_stats: dict[str, dict[str, Any]] = {}
@@ -2306,6 +2363,7 @@ def admin_analytics(authorization: str | None = Header(None), token: str | None 
     users = _load_user_directory()
     analytics = _build_admin_analytics(payload, users, store.load_feedback_entries())
     analytics["generated_at"] = _iso_now()
+    analytics["learning_store"] = _learning_store_status(store)
     return analytics
 
 

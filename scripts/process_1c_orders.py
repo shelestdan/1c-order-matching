@@ -768,10 +768,12 @@ class ManualSelectionEntry:
     order_root_tokens: tuple[str, ...] = ()
     order_dimension_tags: tuple[str, ...] = ()
     structure_keys: tuple[str, ...] = ()
+    structure_profile: tuple[tuple[str, tuple[str, ...]], ...] = ()
     manual_search_query: str = ""
     manual_search_query_key: str = ""
     decision: str = REVIEW_DECISION_APPROVED
     selected_via: str = ""
+    learning_confidence: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -857,6 +859,25 @@ MEMORY_STRUCTURED_PRIORITY = (
     "kvs",
     "lmm",
 )
+LEARNING_PROFILE_KEYS = (
+    "family",
+    "tripledn",
+    "pairdn",
+    "dn",
+    "od",
+    "wall",
+    "pn",
+    "mclass",
+    "grade",
+    "spec",
+    "connection",
+    "conn_gender",
+    "subtype",
+    "type",
+    "deg",
+    "series",
+    "lmm",
+)
 MEMORY_GENERIC_KEY_TOKENS = {
     *COMMON_TOKENS,
     "gost",
@@ -914,6 +935,42 @@ def build_retrieval_structure_keys(
     )
 
 
+def _normalize_learning_structure_profile(profile: object) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    if not isinstance(profile, Mapping):
+        return ()
+    normalized: list[tuple[str, tuple[str, ...]]] = []
+    for key in LEARNING_PROFILE_KEYS:
+        raw_values = profile.get(key)
+        if not isinstance(raw_values, (list, tuple, set)):
+            continue
+        values = tuple(sorted({clean_text(value) for value in raw_values if clean_text(value)}))
+        if values:
+            normalized.append((key, values))
+    return tuple(normalized)
+
+
+def build_learning_structure_profile(dimension_tags: Iterable[str]) -> dict[str, tuple[str, ...]]:
+    tags = set(dimension_tags)
+    grouped = expand_dimension_values(group_dimension_tags(tags))
+    profile: dict[str, tuple[str, ...]] = {}
+    families = sorted(extract_tag_values(tags, "family:") & PRIMARY_FAMILY_TAGS)
+    if not families:
+        families = sorted(extract_tag_values(tags, "family:"))
+    if families:
+        profile["family"] = tuple(families)
+    for key in LEARNING_PROFILE_KEYS:
+        if key == "family":
+            continue
+        values = tuple(sorted(grouped.get(key, set())))
+        if values:
+            profile[key] = values
+    return profile
+
+
+def _learning_profile_tags(profile: tuple[tuple[str, tuple[str, ...]], ...]) -> tuple[str, ...]:
+    return tuple(f"{key}:{value}" for key, values in profile for value in values)
+
+
 def _dedupe_text_values(values: object) -> tuple[str, ...]:
     if not isinstance(values, (list, tuple, set)):
         return ()
@@ -932,8 +989,19 @@ def load_manual_selection_memory(path: Path | None) -> tuple[ManualSelectionEntr
         try:
             with sqlite3.connect(path) as conn:
                 conn.row_factory = sqlite3.Row
+                columns = {row["name"] for row in conn.execute("PRAGMA table_info(feedback_entries)").fetchall()}
+                profile_expr = (
+                    "structure_profile_json"
+                    if "structure_profile_json" in columns
+                    else "'{}' AS structure_profile_json"
+                )
+                confidence_expr = (
+                    "learning_confidence"
+                    if "learning_confidence" in columns
+                    else "1.0 AS learning_confidence"
+                )
                 raw_entries = conn.execute(
-                    """
+                    f"""
                     SELECT
                         record_id,
                         query,
@@ -942,6 +1010,8 @@ def load_manual_selection_memory(path: Path | None) -> tuple[ManualSelectionEntr
                         order_root_tokens_json,
                         order_dimension_tags_json,
                         structure_keys_json,
+                        {profile_expr},
+                        {confidence_expr},
                         manual_search_query,
                         manual_search_query_key,
                         candidate_code,
@@ -1008,6 +1078,18 @@ def load_manual_selection_memory(path: Path | None) -> tuple[ManualSelectionEntr
                 key_tokens=order_key_tokens,
                 dimension_tags=order_dimension_tags,
             )
+        if "structure_profile_json" in raw:
+            structure_profile = _normalize_learning_structure_profile(json.loads(str(raw.get("structure_profile_json") or "{}")))
+        else:
+            structure_profile = _normalize_learning_structure_profile(raw.get("structure_profile"))
+        if not structure_profile:
+            structure_profile = _normalize_learning_structure_profile(build_learning_structure_profile(order_dimension_tags))
+        try:
+            learning_confidence = float(raw.get("learning_confidence", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            learning_confidence = 1.0
+        if learning_confidence < 0.70:
+            continue
         decision = clean_text(raw.get("decision")).lower() or REVIEW_DECISION_APPROVED
         selected_via = clean_text(raw.get("selected_via"))
 
@@ -1021,10 +1103,12 @@ def load_manual_selection_memory(path: Path | None) -> tuple[ManualSelectionEntr
                 order_root_tokens=order_root_tokens,
                 order_dimension_tags=order_dimension_tags,
                 structure_keys=structure_keys,
+                structure_profile=structure_profile,
                 manual_search_query=manual_search_query,
                 manual_search_query_key=manual_search_query_key,
                 decision=decision,
                 selected_via=selected_via,
+                learning_confidence=max(0.0, min(1.0, learning_confidence)),
             )
         )
 
@@ -3307,6 +3391,9 @@ class StockMatcher:
         self.manual_selection_positive_memory = tuple(
             entry for entry in self.manual_selection_memory if entry.decision != REVIEW_DECISION_REJECTED
         )
+        self.manual_selection_rejected_memory = tuple(
+            entry for entry in self.manual_selection_memory if entry.decision == REVIEW_DECISION_REJECTED
+        )
         self.manual_feedback_decisions: dict[str, dict[str, str]] = defaultdict(dict)
         for entry in self.manual_selection_memory:
             normalized_code = normalize_candidate_code(entry.candidate_code)
@@ -3316,7 +3403,7 @@ class StockMatcher:
                 if not key:
                     continue
                 existing = self.manual_feedback_decisions[key].get(normalized_code)
-                if existing == REVIEW_DECISION_REJECTED:
+                if existing:
                     continue
                 self.manual_feedback_decisions[key][normalized_code] = entry.decision or REVIEW_DECISION_APPROVED
         self.substitution_policy = dict(substitution_policy or {})
@@ -3400,6 +3487,7 @@ class StockMatcher:
         forked.reviewed_analog_decisions = self.reviewed_analog_decisions
         forked.manual_selection_memory = self.manual_selection_memory
         forked.manual_selection_positive_memory = self.manual_selection_positive_memory
+        forked.manual_selection_rejected_memory = self.manual_selection_rejected_memory
         forked.manual_feedback_decisions = self.manual_feedback_decisions
         forked.substitution_policy = self.substitution_policy
         forked.search_token_lists = self.search_token_lists
@@ -3490,10 +3578,10 @@ class StockMatcher:
         order: OrderLine,
         current_query_keys: set[str],
         current_structure_keys: set[str],
+        current_profile_tags: set[str],
         entry: ManualSelectionEntry,
     ) -> ManualLearningSignal | None:
-        if entry.decision == REVIEW_DECISION_REJECTED:
-            return None
+        is_rejected = entry.decision == REVIEW_DECISION_REJECTED
         order_key_tokens = set(order.key_tokens)
         order_root_tokens = set(order.root_tokens)
         order_dimension_tags = set(order.dimension_tags)
@@ -3501,6 +3589,7 @@ class StockMatcher:
         learned_root_tokens = set(entry.order_root_tokens)
         learned_dimension_tags = set(entry.order_dimension_tags)
         learned_structure_keys = set(entry.structure_keys)
+        learned_profile_tags = set(_learning_profile_tags(entry.structure_profile))
 
         exact_query_match = entry.query_key in current_query_keys
         exact_structure_match = bool(current_structure_keys & learned_structure_keys)
@@ -3509,6 +3598,7 @@ class StockMatcher:
         root_overlap = safe_overlap(order_root_tokens, learned_root_tokens)
         dimension_overlap = safe_overlap(order_dimension_tags, learned_dimension_tags)
         structure_overlap = safe_overlap(current_structure_keys, learned_structure_keys)
+        profile_overlap = safe_overlap(current_profile_tags, learned_profile_tags)
         manual_query_ratio = (
             token_set_ratio(order.search_text.split(), entry.manual_search_query_key.split())
             if entry.manual_search_query_key
@@ -3519,25 +3609,42 @@ class StockMatcher:
         allow_incompatible = False
         reasons: list[str] = []
 
-        if exact_query_match or exact_structure_match:
+        if exact_query_match or exact_structure_match or (profile_overlap >= 0.90 and len(current_profile_tags) >= 3):
             boost = 34.0
             allow_incompatible = True
-            reasons.append("такую же структурную позицию менеджер уже выбирал")
-        elif structure_overlap >= 0.75 or query_ratio >= 86.0 or (key_overlap >= 0.75 and root_overlap >= 0.65):
+            reasons.append(
+                "менеджер раньше отклонял такую структурную позицию"
+                if is_rejected
+                else "такую же структурную позицию менеджер уже выбирал"
+            )
+        elif structure_overlap >= 0.75 or profile_overlap >= 0.75 or query_ratio >= 86.0 or (key_overlap >= 0.75 and root_overlap >= 0.65):
             boost = 24.0
-            allow_incompatible = True
-            reasons.append("похоже на прошлый ручной выбор менеджера")
-        elif structure_overlap >= 0.5 or query_ratio >= 74.0 or key_overlap >= 0.55 or (root_overlap >= 0.60 and manual_query_ratio >= 45.0):
+            allow_incompatible = not is_rejected
+            reasons.append(
+                "похоже на прошлый отклонённый вариант"
+                if is_rejected
+                else "похоже на прошлый ручной выбор менеджера"
+            )
+        elif structure_overlap >= 0.5 or profile_overlap >= 0.5 or query_ratio >= 74.0 or key_overlap >= 0.55 or (root_overlap >= 0.60 and manual_query_ratio >= 45.0):
             boost = 16.0
-            reasons.append("есть сильное сходство с прошлым ручным выбором")
+            reasons.append(
+                "есть сходство с прошлым отклонённым вариантом"
+                if is_rejected
+                else "есть сильное сходство с прошлым ручным выбором"
+            )
         elif query_ratio >= 68.0 and (
             key_overlap >= 0.35
             or root_overlap >= 0.45
             or manual_query_ratio >= 60.0
             or structure_overlap >= 0.34
+            or profile_overlap >= 0.34
         ):
             boost = 10.0
-            reasons.append("учтён похожий прошлый ручной выбор")
+            reasons.append(
+                "учтён похожий прошлый отказ менеджера"
+                if is_rejected
+                else "учтён похожий прошлый ручной выбор"
+            )
         else:
             return None
 
@@ -3553,18 +3660,33 @@ class StockMatcher:
         elif structure_overlap >= 0.25:
             boost += 3.0
             reasons.append("близкий структурный профиль товара")
+        if profile_overlap >= 0.5:
+            boost += 5.0
+            reasons.append("совпадает сохранённый профиль характеристик")
+        elif profile_overlap >= 0.25:
+            boost += 2.0
+            reasons.append("близкий сохранённый профиль характеристик")
         if manual_query_ratio >= 72.0:
             boost += 3.0
             reasons.append("совпадает логика ручного поиска менеджера")
 
+        confidence = max(0.0, min(1.0, entry.learning_confidence))
+        if is_rejected:
+            penalty = min(28.0, boost) * confidence
+            return ManualLearningSignal(
+                boost=-penalty,
+                allow_incompatible=False,
+                reasons=tuple(dict.fromkeys(reasons)),
+            )
+
         return ManualLearningSignal(
-            boost=min(38.0, boost),
+            boost=min(38.0, boost) * confidence,
             allow_incompatible=allow_incompatible,
             reasons=tuple(dict.fromkeys(reasons)),
         )
 
     def _manual_learning_signals(self, order: OrderLine) -> dict[int, ManualLearningSignal]:
-        if not self.manual_selection_positive_memory:
+        if not self.manual_selection_positive_memory and not self.manual_selection_rejected_memory:
             return {}
 
         signature = self._manual_learning_signature(order)
@@ -3581,12 +3703,16 @@ class StockMatcher:
                 dimension_tags=order.dimension_tags,
             )
         )
+        current_profile_tags = set(
+            _learning_profile_tags(_normalize_learning_structure_profile(build_learning_structure_profile(order.dimension_tags)))
+        )
         signals: dict[int, ManualLearningSignal] = {}
         for entry in self.manual_selection_positive_memory:
             signal = self._signal_from_manual_entry(
                 order=order,
                 current_query_keys=current_query_keys,
                 current_structure_keys=current_structure_keys,
+                current_profile_tags=current_profile_tags,
                 entry=entry,
             )
             if signal is None:
@@ -3594,6 +3720,19 @@ class StockMatcher:
             for stock_index in self.normalized_code_index.get(entry.candidate_code, []):
                 current = signals.get(stock_index)
                 if current is None or signal.boost > current.boost:
+                    signals[stock_index] = signal
+        for entry in self.manual_selection_rejected_memory:
+            signal = self._signal_from_manual_entry(
+                order=order,
+                current_query_keys=current_query_keys,
+                current_structure_keys=current_structure_keys,
+                current_profile_tags=current_profile_tags,
+                entry=entry,
+            )
+            if signal is None or signal.boost >= 0:
+                continue
+            for stock_index in self.normalized_code_index.get(entry.candidate_code, []):
+                if stock_index not in signals:
                     signals[stock_index] = signal
 
         self._manual_learning_cache[signature] = signals
@@ -3619,7 +3758,7 @@ class StockMatcher:
         return ranked
 
     def _apply_reviewed_candidate_decisions(self, order: OrderLine, candidates: Sequence[Candidate]) -> list[Candidate]:
-        if not self.reviewed_analog_decisions:
+        if not self.reviewed_analog_decisions and not self.manual_feedback_decisions:
             return list(candidates)
 
         adjusted: list[Candidate] = []

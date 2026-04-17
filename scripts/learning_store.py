@@ -87,6 +87,11 @@ class LearningStore:
                 CREATE INDEX IF NOT EXISTS idx_export_saved_at ON export_events(saved_at);
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(feedback_entries)").fetchall()}
+            if "structure_profile_json" not in columns:
+                conn.execute("ALTER TABLE feedback_entries ADD COLUMN structure_profile_json TEXT NOT NULL DEFAULT '{}'")
+            if "learning_confidence" not in columns:
+                conn.execute("ALTER TABLE feedback_entries ADD COLUMN learning_confidence REAL NOT NULL DEFAULT 1.0")
 
     def migrate_legacy_payloads(
         self,
@@ -187,11 +192,12 @@ class LearningStore:
                     INSERT OR REPLACE INTO feedback_entries (
                         record_id, snapshot_id, job_id, row_id, query, query_key,
                         structure_keys_json, order_key_tokens_json, order_root_tokens_json, order_dimension_tags_json,
+                        structure_profile_json, learning_confidence,
                         manual_search_query, manual_search_query_key,
                         candidate_code, candidate_name, candidate_source_label,
                         decision, selected_via, initial_status, selected_by, selected_by_display,
                         selected_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(entry.get("record_id") or "").strip(),
@@ -204,6 +210,8 @@ class LearningStore:
                         _json_dumps(entry.get("order_key_tokens") or []),
                         _json_dumps(entry.get("order_root_tokens") or []),
                         _json_dumps(entry.get("order_dimension_tags") or []),
+                        _json_dumps(entry.get("structure_profile") or {}),
+                        float(entry.get("learning_confidence", 1.0) or 1.0),
                         str(entry.get("manual_search_query") or "").strip(),
                         str(entry.get("manual_search_query_key") or "").strip(),
                         str(entry.get("candidate_code") or "").strip(),
@@ -228,6 +236,7 @@ class LearningStore:
                 SELECT
                     record_id, snapshot_id, job_id, row_id, query, query_key,
                     structure_keys_json, order_key_tokens_json, order_root_tokens_json, order_dimension_tags_json,
+                    structure_profile_json, learning_confidence,
                     manual_search_query, manual_search_query_key,
                     candidate_code, candidate_name, candidate_source_label,
                     decision, selected_via, initial_status, selected_by, selected_by_display,
@@ -250,6 +259,8 @@ class LearningStore:
                     "order_key_tokens": _json_loads(row["order_key_tokens_json"], []),
                     "order_root_tokens": _json_loads(row["order_root_tokens_json"], []),
                     "order_dimension_tags": _json_loads(row["order_dimension_tags_json"], []),
+                    "structure_profile": _json_loads(row["structure_profile_json"], {}),
+                    "learning_confidence": float(row["learning_confidence"] or 1.0),
                     "manual_search_query": row["manual_search_query"],
                     "manual_search_query_key": row["manual_search_query_key"],
                     "candidate_code": row["candidate_code"],

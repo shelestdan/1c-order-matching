@@ -18,6 +18,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import matching_api as matching_api_module  # noqa: E402
+from learning_store import LearningStore  # noqa: E402
 from matching_api import (  # noqa: E402
     SHARED_PASSWORD,
     AuthUser,
@@ -40,17 +41,21 @@ from matching_api import (  # noqa: E402
 )
 from process_1c_orders import (  # noqa: E402
     Candidate,
+    ManualSelectionEntry,
     OrderLine,
     StockItem,
     StockMatcher,
     augment_search_text_with_dimension_tags,
+    build_learning_structure_profile,
     build_search_text,
+    build_structural_query_keys,
     extract_dimension_tags,
     extract_family_tags,
     extract_key_tokens,
     extract_material_tags_from_search_text,
     extract_root_tokens,
     extract_tokens,
+    load_manual_selection_memory,
 )
 
 
@@ -289,6 +294,145 @@ class MatchingApiHelpersTest(unittest.TestCase):
         top = analytics["top_replacements"][0]
         self.assertEqual(top["candidate_code"], "009")
         self.assertEqual(top["times_learned"], 1)
+        self.assertEqual(analytics["summary"]["positive_feedback_count"], 1)
+        self.assertEqual(analytics["summary"]["negative_feedback_count"], 1)
+        self.assertEqual(analytics["summary"]["feedback_by_source"]["unknown"], 2)
+
+    def test_learning_store_persists_structure_profile_and_confidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "learning.db"
+            store = LearningStore(path)
+            store.replace_feedback_snapshot(
+                "job-1:row-1",
+                [
+                    {
+                        "record_id": "job-1:row-1:approved:001",
+                        "job_id": "job-1",
+                        "row_id": "row-1",
+                        "query": "Фланец Ду40 Ру16",
+                        "query_key": build_search_text("Фланец Ду40 Ру16"),
+                        "structure_keys": ["family=flange|dn=40|pn=16"],
+                        "structure_profile": {"family": ("flange",), "dn": ("40",), "pn": ("16",)},
+                        "order_key_tokens": ["flanets", "dn40", "pn16"],
+                        "order_root_tokens": ["flanets"],
+                        "order_dimension_tags": ["family:flange", "dn:40", "pn:16"],
+                        "manual_search_query": "",
+                        "manual_search_query_key": "",
+                        "candidate_code": "001",
+                        "candidate_name": "Фланец Ду40 Ру16",
+                        "candidate_source_label": "ЭК",
+                        "decision": "approved",
+                        "selected_via": "analog",
+                        "initial_status": "Допустимая замена по согласованию",
+                        "selected_by": "anisovets",
+                        "selected_by_display": "Анисовец",
+                        "selected_at": "2026-04-17T10:00:00Z",
+                        "updated_at": "2026-04-17T10:00:00Z",
+                        "learning_confidence": 0.95,
+                    }
+                ],
+            )
+
+            entries = store.load_feedback_entries()
+            self.assertEqual(entries[0]["structure_profile"]["family"], ["flange"])
+            self.assertEqual(entries[0]["learning_confidence"], 0.95)
+
+            memory = load_manual_selection_memory(path)
+            self.assertEqual(memory[0].structure_profile, (("family", ("flange",)), ("dn", ("40",)), ("pn", ("16",))))
+            self.assertEqual(memory[0].learning_confidence, 0.95)
+
+    def test_manual_rejected_memory_filters_candidate_without_reviewed_file(self) -> None:
+        def build_order(name: str) -> OrderLine:
+            search_text = build_search_text(name)
+            dimension_tags = (
+                extract_dimension_tags(name)
+                | extract_family_tags(name)
+                | extract_material_tags_from_search_text(search_text)
+            )
+            search_text = augment_search_text_with_dimension_tags(search_text, dimension_tags)
+            tokens = extract_tokens(search_text)
+            return OrderLine(
+                source_file="test.xlsx",
+                sheet_name="Sheet1",
+                source_row=2,
+                headers=[],
+                row_values=[],
+                position="1",
+                name=name,
+                mark="",
+                supplier_code="",
+                vendor="",
+                unit="шт",
+                requested_qty=1.0,
+                search_text=search_text,
+                search_tokens=tokens,
+                key_tokens=extract_key_tokens(tokens),
+                root_tokens=extract_root_tokens(tokens),
+                code_tokens=set(),
+                dimension_tags=dimension_tags,
+                raw_query=name,
+            )
+
+        def build_stock(row_index: int, code: str, name: str) -> StockItem:
+            search_text = build_search_text(name)
+            dimension_tags = (
+                extract_dimension_tags(name)
+                | extract_family_tags(name)
+                | extract_material_tags_from_search_text(search_text)
+            )
+            search_text = augment_search_text_with_dimension_tags(search_text, dimension_tags)
+            tokens = extract_tokens(search_text)
+            return StockItem(
+                row_index=row_index,
+                code_1c=code,
+                name=name,
+                print_name=name,
+                product_type="",
+                sale_price="",
+                stop_price="",
+                plan_price="",
+                quantity=5.0,
+                remaining=5.0,
+                search_text=search_text,
+                search_tokens=tokens,
+                key_tokens=extract_key_tokens(tokens),
+                root_tokens=extract_root_tokens(tokens),
+                code_tokens=set(),
+                dimension_tags=dimension_tags,
+            )
+
+        order = build_order("Фланец стальной Ду40 Ру16")
+        structure_keys = build_structural_query_keys(
+            search_text=order.search_text,
+            key_tokens=order.key_tokens,
+            dimension_tags=order.dimension_tags,
+        )
+        rejected = ManualSelectionEntry(
+            record_id="reject-1",
+            candidate_code="BAD",
+            query=order.name,
+            query_key=order.search_text,
+            order_key_tokens=tuple(sorted(order.key_tokens)),
+            order_root_tokens=tuple(sorted(order.root_tokens)),
+            order_dimension_tags=tuple(sorted(order.dimension_tags)),
+            structure_keys=structure_keys,
+            structure_profile=tuple(build_learning_structure_profile(order.dimension_tags).items()),
+            decision="rejected",
+            selected_via="manual_search",
+            learning_confidence=1.0,
+        )
+        matcher = StockMatcher(
+            [
+                build_stock(1, "BAD", "Фланец стальной Ду40 Ру16"),
+                build_stock(2, "GOOD", "Фланец стальной Ду40 Ру16 ГОСТ 33259"),
+            ],
+            manual_selection_memory=[rejected],
+        )
+
+        codes = [candidate.stock.code_1c for candidate in matcher.rank_candidates(order, limit=5)]
+
+        self.assertNotIn("BAD", codes)
+        self.assertIn("GOOD", codes)
 
     def test_serialize_candidate_keeps_stock_quantity_separate_from_free_remaining(self) -> None:
         stock = StockItem(
