@@ -189,6 +189,44 @@ class MatchingPipelineContractTest(unittest.TestCase):
         result = match_orders([order], self.make_matcher(incompatible_size_stock), use_full_scan_fallback=True)[0]
         self.assertEqual(result.status, STATUS_APPROVAL_ANALOG)
 
+    def test_hard_negative_smaller_diameter_contract_blocks_downsizing_analogs(self) -> None:
+        cases = [
+            (
+                "Фланец стальной Ду700 Ру16",
+                ("FLANGE-SMALL", "Фланец стальной Ду600 Ру16"),
+                ("FLANGE-OK", "Фланец стальной Ду700 Ру16"),
+            ),
+            (
+                "Труба стальная 219х6 ГОСТ 10704",
+                ("PIPE-SMALL", "Труба стальная 159х6 ГОСТ 10704"),
+                ("PIPE-OK", "Труба стальная 219х6 ГОСТ 10704"),
+            ),
+            (
+                "Переход К-1-273х7-219х6-В10 ГОСТ 17378",
+                ("RED-SMALL", "Переход К-1-219х6-159х5-В10 ГОСТ 17378"),
+                ("RED-OK", "Переход К-1-273х7-219х6-В10 ГОСТ 17378"),
+            ),
+        ]
+
+        for query, smaller, expected in cases:
+            with self.subTest(query=query):
+                order = self.make_order(query)
+                smaller_stock = self.make_stock(1, smaller[0], smaller[1])
+                expected_stock = self.make_stock(2, expected[0], expected[1])
+                matcher = self.make_matcher(smaller_stock, expected_stock)
+
+                ranked = matcher.find_candidates(order, limit=5)
+                ranked_codes = [candidate.stock.code_1c for candidate in ranked]
+
+                self.assertNotIn(smaller[0], ranked_codes)
+                self.assertIn(expected[0], ranked_codes)
+
+                result = match_orders([order], self.make_matcher(smaller_stock, expected_stock), use_full_scan_fallback=True)[0]
+                analog_codes = [candidate.stock.code_1c for candidate in result.analogs]
+
+                self.assertNotEqual(result.status, STATUS_NOT_FOUND)
+                self.assertNotIn(smaller[0], analog_codes)
+
     def test_retrieval_contract_keeps_expected_candidates_before_ranking(self) -> None:
         cases = [
             (

@@ -71,6 +71,7 @@ TOKEN_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁёІіЇїЄєҐґ/+,.\"=:-]+")
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁёІіЇїЄєҐґ]")
 LATIN_RE = re.compile(r"[A-Za-z]")
 DIGIT_RE = re.compile(r"\d")
+DIMENSION_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 
 LATIN_TO_CYR_MIXED = {
     "A": "А",
@@ -2672,6 +2673,37 @@ def _dimension_union(grouped_dimensions: dict[str, set[str]], *keys: str) -> set
     return values
 
 
+def _numeric_dimension_values(values: Iterable[str]) -> list[float]:
+    numbers: list[float] = []
+    for value in values:
+        for match in DIMENSION_NUMBER_RE.findall(str(value)):
+            try:
+                numbers.append(float(match.replace(",", ".")))
+            except ValueError:
+                continue
+    return numbers
+
+
+def _diameter_values_for_compare(grouped_dimensions: dict[str, set[str]], key: str) -> list[float]:
+    values = set(grouped_dimensions.get(key, set()))
+    if key == "dn":
+        # Some noisy rows tag Ру/PN as dn too. Do not let pressure make DN comparison stricter.
+        pn_values = {normalize_measure_value(value) for value in grouped_dimensions.get("pn", set())}
+        values = {value for value in values if normalize_measure_value(value) not in pn_values}
+        values |= grouped_dimensions.get("pairdn", set())
+        values |= grouped_dimensions.get("tripledn", set())
+    return _numeric_dimension_values(values)
+
+
+def has_smaller_candidate_diameter(order: OrderLine, stock: StockItem) -> bool:
+    for key in ("dn", "od"):
+        order_values = _diameter_values_for_compare(order.expanded_dimensions, key)
+        stock_values = _diameter_values_for_compare(stock.expanded_dimensions, key)
+        if order_values and stock_values and max(stock_values) + 1e-9 < max(order_values):
+            return True
+    return False
+
+
 def _family_partial_dimension_bonus(
     family: str,
     order_dimensions: dict[str, set[str]],
@@ -4000,6 +4032,7 @@ class StockMatcher:
             self._has_compatible_families(order, stock)
             and self._has_compatible_materials(order, stock)
             and self._has_required_dimension_matches(order, stock)
+            and not has_smaller_candidate_diameter(order, stock)
             and self._has_compatible_family_specific_subtypes(order, stock)
         )
 
